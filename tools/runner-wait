@@ -1,0 +1,140 @@
+#!/bin/bash
+# Copyright (c) 2026, NVIDIA CORPORATION.  All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# runner-wait: Report queue-wait latency for the private nvkind GPU runners.
+#
+# Wait time = job.started_at - job.created_at. Jobs are filtered to those
+# whose runner_group_name starts with `nv-gpu-` (the self-hosted nvkind pool
+# identifier). Aggregated by GPU model (extracted from the runner group
+# name) and printed as a markdown table.
+#
+# Usage:
+#   tools/runner-wait [-d DAYS] [-r OWNER/REPO]
+#   tools/runner-wait -h
+#
+# Defaults: 7 days, NVIDIA/aicr.
+#
+# Requires: gh, jq.
+
+set -euo pipefail
+
+DAYS=7
+REPO="NVIDIA/aicr"
+
+usage() {
+    sed -n '17,29p' "$0"
+    exit "${1:-0}"
+}
+
+while getopts ":d:r:h" opt; do
+    case "$opt" in
+        d) DAYS="$OPTARG" ;;
+        r) REPO="$OPTARG" ;;
+        h) usage 0 ;;
+        *) usage 1 ;;
+    esac
+done
+
+command -v gh >/dev/null || { echo "gh CLI not installed" >&2; exit 2; }
+command -v jq >/dev/null || { echo "jq not installed" >&2; exit 2; }
+
+# Date floor in ISO-8601 (UTC). GitHub API accepts >=YYYY-MM-DD filters.
+if date -v -1d >/dev/null 2>&1; then
+    SINCE="$(date -u -v "-${DAYS}d" +%Y-%m-%d)"  # BSD/macOS
+else
+    SINCE="$(date -u -d "${DAYS} days ago" +%Y-%m-%d)"  # GNU/Linux
+fi
+
+echo "Scanning $REPO for nvkind runner waits since $SINCE..." >&2
+
+# Discover workflows whose name suggests nvkind use. The repo convention is
+# "GPU * (nvkind + *)". This avoids fetching every workflow's runs.
+WORKFLOWS_JSON="$(gh api "repos/$REPO/actions/workflows" --paginate \
+    --jq '[.workflows[] | select(.name | test("nvkind"; "i")) | {id, name}]')"
+
+WF_COUNT="$(echo "$WORKFLOWS_JSON" | jq 'length')"
+if [ "$WF_COUNT" -eq 0 ]; then
+    echo "No workflows matching /nvkind/i found in $REPO" >&2
+    exit 0
+fi
+echo "Found $WF_COUNT nvkind workflows" >&2
+
+# Collect jobs across all matching workflows' runs in the window.
+TMP="$(mktemp)"
+trap 'rm -f "$TMP"' EXIT
+
+echo "$WORKFLOWS_JSON" | jq -r '.[] | "\(.id)\t\(.name)"' | while IFS=$'\t' read -r WF_ID WF_NAME; do
+    echo "  fetching runs for: $WF_NAME (id=$WF_ID)" >&2
+    # List run IDs created in the window. status:in_progress|completed excludes
+    # queued (no started_at yet) so wait math stays well-defined.
+    RUN_IDS="$(gh api "repos/$REPO/actions/workflows/$WF_ID/runs?created=>=$SINCE&per_page=100" \
+        --paginate --jq '.workflow_runs[] | select(.status == "completed") | .id')"
+    for RUN_ID in $RUN_IDS; do
+        gh api "repos/$REPO/actions/runs/$RUN_ID/jobs?per_page=100" --paginate \
+            --jq '.jobs[]
+                | select(.runner_group_name != null)
+                | select(.runner_group_name | startswith("nv-gpu-"))
+                | select(.started_at != null and .created_at != null)
+                | {
+                    wf: "'"$WF_NAME"'",
+                    group: .runner_group_name,
+                    label: ([.labels[]? | select(startswith("linux-amd64-gpu-"))] | first // .runner_group_name),
+                    created: .created_at,
+                    started: .started_at,
+                    conclusion: .conclusion
+                }' >> "$TMP"
+    done
+done
+
+JOB_COUNT="$(wc -l < "$TMP" | tr -d ' ')"
+if [ "$JOB_COUNT" -eq 0 ]; then
+    echo "No nvkind jobs found in the window." >&2
+    exit 0
+fi
+echo "Collected $JOB_COUNT nvkind jobs; aggregating..." >&2
+echo
+
+# Aggregate by GPU model parsed from runner_group_name (nv-gpu-amd64-<model>-<n>gpu).
+# jq computes count, min, p50, p95, max, mean per group.
+jq -rs --arg since "$SINCE" --arg days "$DAYS" '
+    def pct(p):
+        if length == 0 then null
+        else
+            sort as $s
+            | ($s | length) as $n
+            | ($s[((p * ($n - 1)) / 100) | floor]) end;
+
+    map(. + {
+        wait_s: (((.started | fromdateiso8601) - (.created | fromdateiso8601)) | floor),
+        model: (.group | capture("nv-gpu-(amd64-)?(?<m>[a-z0-9]+)") | .m)
+    })
+    | group_by(.model)
+    | map({
+        model: .[0].model,
+        n: length,
+        min: ([.[].wait_s] | min),
+        p50: ([.[].wait_s] | pct(50)),
+        p95: ([.[].wait_s] | pct(95)),
+        max: ([.[].wait_s] | max),
+        mean: ((([.[].wait_s] | add) / length) | floor)
+      }) as $rows
+    | "# nvkind runner queue-wait — last \($days) days (since \($since))",
+      "",
+      "Wait = job.started_at − job.created_at. Source: GitHub Actions API.",
+      "",
+      "| GPU | jobs | min | p50 | p95 | max | mean |",
+      "|-----|-----:|----:|----:|----:|----:|-----:|",
+      ($rows[] | "| \(.model) | \(.n) | \(.min)s | \(.p50)s | \(.p95)s | \(.max)s | \(.mean)s |")
+' "$TMP"
