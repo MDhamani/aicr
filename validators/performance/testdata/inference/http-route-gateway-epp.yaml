@@ -12,22 +12,28 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# DRA ResourceClaimTemplate for the inference benchmark workload.
-# One instance is allocated per worker pod (1 GPU each) by the Dynamo operator
-# when a pod references the claim via podTemplate.spec.resourceClaims.
-# Must stay in sync with inferenceClaimTemplateName in inference_perf_constraint.go.
-
-apiVersion: resource.k8s.io/v1
-kind: ResourceClaimTemplate
+apiVersion: gateway.networking.k8s.io/v1
+kind: HTTPRoute
 metadata:
-  name: ${CLAIM_TEMPLATE_NAME}
+  name: ${DEPLOYMENT_NAME}-route
   namespace: ${NAMESPACE}
 spec:
-  spec:
-    devices:
-      requests:
-        - name: gpu
-          exactly:
-            deviceClassName: gpu.nvidia.com
-            allocationMode: ExactCount
-            count: 1
+  parentRefs:
+    - group: gateway.networking.k8s.io
+      kind: Gateway
+      name: inference-gateway
+      namespace: agentgateway-system
+  rules:
+    - backendRefs:
+        - group: inference.networking.k8s.io
+          kind: InferencePool
+          name: ${DEPLOYMENT_NAME}-pool
+          namespace: ${NAMESPACE}
+          port: 8000
+          weight: 1
+      matches:
+        - path:
+            type: PathPrefix
+            value: /
+      timeouts:
+        request: 300s
