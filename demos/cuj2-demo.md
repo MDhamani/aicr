@@ -191,8 +191,8 @@
 │  └──────────────────────┘       └──────────────────────┘        │
 │                                                                 │
 │  Discovery: Kubernetes-native (no etcd)                         │
-│  Routing:   KV-cache-aware frontend routing                     │
-│  Events:    NATS-backed Kubernetes event plane                  │
+│  Requests:  Dynamo request plane (default TCP)                  │
+│  Events:    NATS event plane for worker KV-cache events         │
 │                                                                 │
 │  CRDs (6):                                                      │
 │  ├── DynamoGraphDeployment         (inference serving graph)    │
@@ -213,7 +213,7 @@
 │  DynamoGraphDeployment: vllm-agg                                │
 │  Status: successful — All resources are ready                   │
 │                                                                 │
-│  ┌─────────┐  HTTP  ┌───────────────┐  NATS  ┌──────────────┐   │
+│  ┌─────────┐  HTTP  ┌───────────────┐  TCP   ┌──────────────┐   │
 │  │  Client │───────▶│   Frontend    │───────▶│ VllmDecode   │   │
 │  │ (OpenAI │ :8000  │               │        │   Worker     │   │
 │  │  API)   │◀───────│ vllm-runtime  │◀───────│              │   │
@@ -229,9 +229,10 @@
 │                                                                 │
 │  Flow:                                                          │
 │    1. Client → /v1/chat/completions → Frontend :8000            │
-│    2. Frontend → NATS event/data plane → VllmDecodeWorker       │
+│    2. Frontend → Dynamo request plane (TCP) → VllmDecodeWorker  │
 │    3. VllmDecodeWorker runs Qwen3-0.6B on H100                  │
-│    4. Response: Worker → NATS → Frontend → Client               │
+│    4. Worker relays local vLLM ZMQ KV events to NATS            │
+│    5. KV router consumes NATS events; response returns over TCP │
 └─────────────────────────────────────────────────────────────────┘
 ```
 ### ChatBot

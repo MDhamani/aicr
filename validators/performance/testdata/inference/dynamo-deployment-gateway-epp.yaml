@@ -14,7 +14,9 @@
 
 # Dynamo inference workload for performance benchmarking through GAIE/EPP.
 # EPP performs KV-cache-aware endpoint selection and worker frontend sidecars
-# run in direct mode so they honor EPP's routing headers.
+# run in direct mode so they honor EPP's routing headers. Direct mode is not
+# the local ZMQ-to-NATS relay; the Dynamo worker runtime relays vLLM KV-cache
+# events from the local ZMQ publisher onto the NATS-backed event plane.
 #
 # Pod scheduling (nodeSelector / tolerations / resourceClaims bindings) is
 # injected programmatically from Go (see applyInferenceWorkerScheduling in

@@ -15,6 +15,9 @@
 # Dynamo inference workload for performance benchmarking.
 # Deploys a vLLM aggregated backend with a small model for smoke testing.
 # Worker replicas scale to match available GPUs (1 GPU per replica via DRA).
+# Frontend-to-worker traffic uses Dynamo's request plane default (TCP). The
+# local vLLM ZMQ KV-event publisher feeds the worker runtime, which relays
+# KV-cache events onto the NATS-backed Dynamo event plane.
 #
 # Target overlays require K8s 1.34+ with nvidia-dra-driver-gpu, so worker
 # GPUs are requested through a DRA ResourceClaimTemplate rather than raw

@@ -26,6 +26,8 @@ global:
   # Dynamo 1.2 defaults the runtime event plane to NATS for distributed
   # Kubernetes backends. Install the bundled NATS chart so workloads can use
   # the runtime default instead of per-workload DYN_EVENT_PLANE overrides.
+  # Request/response traffic stays on Dynamo's request plane default (TCP)
+  # unless a workload explicitly sets DYN_REQUEST_PLANE.
   nats:
     install: true
   # Disable kai-scheduler sub-chart install — managed as a separate AICR component.

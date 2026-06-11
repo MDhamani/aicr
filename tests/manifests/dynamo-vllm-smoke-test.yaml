@@ -18,8 +18,10 @@
 # No HuggingFace token required.
 #
 # Uses the Dynamo 1.2 Kubernetes path: Kubernetes-native discovery plus the
-# NATS-backed event plane from the dynamo-platform chart. The frontend runs
-# KV-cache-aware routing and the vLLM worker publishes live KV events.
+# NATS-backed event plane from the dynamo-platform chart. Request/response
+# traffic uses Dynamo's request plane default (TCP). The frontend runs
+# KV-cache-aware routing; the local vLLM engine publishes KV events through
+# ZMQ and the Dynamo worker runtime relays them onto the NATS event plane.
 #
 # Usage:
 #   kubectl apply -f tests/manifests/dynamo-vllm-smoke-test.yaml -n dynamo-system

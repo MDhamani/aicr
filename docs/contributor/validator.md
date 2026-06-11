@@ -479,12 +479,16 @@ run-to-run TTFT fluctuation (see NVIDIA/aicr#1192):
   (`temperature: 0`). Input determinism stabilizes *throughput*; it does not
   remove system-side p99 jitter at the knee.
 - **Routing matters.** The inference-perf workload uses Dynamo's KV router
-  (`DYN_ROUTER_MODE=kv`) with live worker KV events. The platform chart enables
-  the NATS event plane, and the vLLM workers publish KV-cache events so routing
-  decisions use observed cache state instead of approximate prediction. The
-  `inference-routing-mode` recipe input defaults to `dynamo-router`; set
+  (`DYN_ROUTER_MODE=kv`) with live worker KV events. Frontend-to-worker
+  requests use Dynamo's request plane (Dynamo 1.2 defaults to TCP; AICR does
+  not set `DYN_REQUEST_PLANE=nats`). The platform chart enables the NATS event
+  plane, the local vLLM engine publishes KV-cache events through its ZMQ
+  publisher, and the Dynamo worker runtime relays those events onto NATS so
+  routing decisions use observed cache state instead of approximate prediction.
+  The `inference-routing-mode` recipe input defaults to `dynamo-router`; set
   `gateway-epp` to validate the GAIE/EPP path through agentgateway with worker
-  frontend sidecars in direct mode.
+  frontend sidecars in direct mode. The direct-mode sidecars honor EPP routing
+  headers; they do not perform the ZMQ-to-NATS KV-event relay.
 - **The AIPerf load generator co-locates with the GPU workers, but that is not
   resource contention.** It is CPU-only and the GPU node has ample CPU headroom
   (measured node CPU pressure ≈ 0 across runs); co-location does not starve the

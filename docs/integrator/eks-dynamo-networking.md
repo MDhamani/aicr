@@ -2,8 +2,13 @@
 
 For `*-eks-ubuntu-inference-dynamo` recipes, AICR configures
 `dynamo-platform` with Kubernetes-native discovery and the standard NATS
-event plane:
+event plane for KV-cache and runtime events:
 - `nats` on TCP `4222`
+
+Frontend-to-worker inference request/response traffic is separate: Dynamo 1.2
+defaults `DYN_REQUEST_PLANE` to TCP, and AICR does not override it to NATS. The
+worker runtime relays local vLLM ZMQ KV-cache events onto the NATS-backed event
+plane so the KV router or EPP can consume live cache state.
 
 If system components and GPU workloads are on different node groups/security groups, these ports may be blocked from GPU nodes to system nodes. Typical symptoms:
 - `JetStream not available` (NATS unreachable)
