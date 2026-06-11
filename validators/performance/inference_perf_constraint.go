@@ -377,7 +377,10 @@ func validateInferencePerf(ctx *validators.Context) (*inferenceResult, error) {
 	// Look up the serving endpoint after the workload is ready. In Dynamo
 	// router mode this is the frontend Service; in gateway-epp mode it is the
 	// AICR-managed inference gateway that routes to the generated InferencePool.
-	endpoint := resolveInferenceEndpoint(ctx, config)
+	endpoint, err := resolveInferenceEndpoint(ctx, config)
+	if err != nil {
+		return nil, err
+	}
 
 	slog.Info("Using inference endpoint", "endpoint", endpoint, "concurrency", config.concurrency)
 
@@ -967,13 +970,17 @@ func ensureMainContainerResourceClaims(podSpec map[string]interface{}, claims []
 	if len(containers) == 0 {
 		containers = []interface{}{map[string]interface{}{keyName: mainContainerName}}
 	}
-	mainIdx := 0
+	mainIdx := -1
 	for i, raw := range containers {
 		container, ok := raw.(map[string]interface{})
 		if ok && container[keyName] == mainContainerName {
 			mainIdx = i
 			break
 		}
+	}
+	if mainIdx == -1 {
+		mainIdx = len(containers)
+		containers = append(containers, map[string]interface{}{keyName: mainContainerName})
 	}
 
 	container, ok := containers[mainIdx].(map[string]interface{})
@@ -1373,11 +1380,11 @@ func resolveFrontendEndpoint(ctx *validators.Context, namespace string) string {
 	return fmt.Sprintf("http://%s.%s.svc:%d", svc.Name, svc.Namespace, port)
 }
 
-func resolveInferenceEndpoint(ctx *validators.Context, config *inferenceWorkloadConfig) string {
+func resolveInferenceEndpoint(ctx *validators.Context, config *inferenceWorkloadConfig) (string, error) {
 	if config.routingMode == inferenceRoutingModeGatewayEPP {
 		return resolveGatewayEndpoint(ctx)
 	}
-	return resolveFrontendEndpoint(ctx, config.namespace)
+	return resolveFrontendEndpoint(ctx, config.namespace), nil
 }
 
 // resolveGatewayEndpoint returns the in-cluster URL for the AICR-managed
@@ -1385,15 +1392,15 @@ func resolveInferenceEndpoint(ctx *validators.Context, config *inferenceWorkload
 // the Gateway resource, so fall back to the conventional name and port when it
 // is not yet inspectable; waitForEndpointReady will surface a real timeout if
 // the gateway never serves the route.
-func resolveGatewayEndpoint(ctx *validators.Context) string {
+func resolveGatewayEndpoint(ctx *validators.Context) (string, error) {
 	lookupCtx, cancel := context.WithTimeout(ctx.Ctx, defaults.DiagnosticTimeout)
 	defer cancel()
 
 	svcs, err := ctx.Clientset.CoreV1().Services(inferenceGatewayNamespace).List(lookupCtx, metav1.ListOptions{})
 	if err != nil {
-		slog.Debug("Inference gateway service lookup failed, using default gateway endpoint",
+		slog.Debug("Inference gateway service lookup failed",
 			"namespace", inferenceGatewayNamespace, "service", inferenceGatewayName, "port", inferenceGatewayPort, "error", err)
-		return defaultGatewayEndpoint()
+		return "", errors.Wrap(errors.ErrCodeInternal, "failed to list inference gateway services", err)
 	}
 
 	var selected *v1.Service
@@ -1410,11 +1417,11 @@ func resolveGatewayEndpoint(ctx *validators.Context) string {
 	if selected == nil {
 		slog.Debug("Inference gateway service not found, using default gateway endpoint",
 			"namespace", inferenceGatewayNamespace, "service", inferenceGatewayName, "port", inferenceGatewayPort)
-		return defaultGatewayEndpoint()
+		return defaultGatewayEndpoint(), nil
 	}
 
 	port := inferServicePort(*selected)
-	return fmt.Sprintf("http://%s.%s.svc:%d", selected.Name, selected.Namespace, port)
+	return fmt.Sprintf("http://%s.%s.svc:%d", selected.Name, selected.Namespace, port), nil
 }
 
 func defaultGatewayEndpoint() string {

@@ -40,6 +40,7 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 )
 
 func TestHasDynamoPlatform(t *testing.T) {
@@ -547,6 +548,41 @@ func TestApplyInferenceWorkerScheduling_MissingServices(t *testing.T) {
 	err := applyInferenceWorkerScheduling(obj, &inferenceWorkloadConfig{})
 	if err == nil {
 		t.Fatal("applyInferenceWorkerScheduling() expected error for missing spec.components, got nil")
+	}
+}
+
+func TestEnsureMainContainerResourceClaims_AppendsMainWhenMissing(t *testing.T) {
+	podSpec := map[string]interface{}{
+		"containers": []interface{}{
+			map[string]interface{}{keyName: "sidecar-frontend"},
+		},
+	}
+	ensureMainContainerResourceClaims(podSpec, []interface{}{map[string]interface{}{keyName: "gpu"}})
+
+	containers, _, err := unstructured.NestedSlice(podSpec, "containers")
+	if err != nil {
+		t.Fatalf("read containers: %v", err)
+	}
+	if len(containers) != 2 {
+		t.Fatalf("containers count = %d, want 2: %v", len(containers), containers)
+	}
+	sidecar := containers[0].(map[string]interface{})
+	if sidecar[keyName] != "sidecar-frontend" {
+		t.Fatalf("first container = %v, want original sidecar preserved", sidecar)
+	}
+	if _, found, _ := unstructured.NestedSlice(sidecar, "resources", "claims"); found {
+		t.Fatal("sidecar unexpectedly received GPU resource claims")
+	}
+	main := containers[1].(map[string]interface{})
+	if main[keyName] != mainContainerName {
+		t.Fatalf("appended container name = %v, want %s", main[keyName], mainContainerName)
+	}
+	claims, _, err := unstructured.NestedSlice(main, "resources", "claims")
+	if err != nil {
+		t.Fatalf("read appended main resources.claims: %v", err)
+	}
+	if len(claims) != 1 {
+		t.Fatalf("appended main resource claims count = %d, want 1", len(claims))
 	}
 }
 
@@ -1211,7 +1247,11 @@ func TestResolveInferenceEndpoint(t *testing.T) {
 		ctx := &validators.Context{Ctx: context.Background(), Clientset: fake.NewClientset(frontendSvc, gatewaySvc)}
 		config := &inferenceWorkloadConfig{namespace: ns, routingMode: inferenceRoutingModeDynamoRouter}
 		want := "http://aicr-inference-perf-frontend.aicr-inference-perf-test.svc:9000"
-		if got := resolveInferenceEndpoint(ctx, config); got != want {
+		got, err := resolveInferenceEndpoint(ctx, config)
+		if err != nil {
+			t.Fatalf("resolveInferenceEndpoint() error: %v", err)
+		}
+		if got != want {
 			t.Errorf("resolveInferenceEndpoint() = %q, want %q", got, want)
 		}
 	})
@@ -1220,7 +1260,11 @@ func TestResolveInferenceEndpoint(t *testing.T) {
 		ctx := &validators.Context{Ctx: context.Background(), Clientset: fake.NewClientset(frontendSvc, gatewaySvc)}
 		config := &inferenceWorkloadConfig{namespace: ns, routingMode: inferenceRoutingModeGatewayEPP}
 		want := "http://inference-gateway.agentgateway-system.svc:8080"
-		if got := resolveInferenceEndpoint(ctx, config); got != want {
+		got, err := resolveInferenceEndpoint(ctx, config)
+		if err != nil {
+			t.Fatalf("resolveInferenceEndpoint() error: %v", err)
+		}
+		if got != want {
 			t.Errorf("resolveInferenceEndpoint() = %q, want %q", got, want)
 		}
 	})
@@ -1228,8 +1272,28 @@ func TestResolveInferenceEndpoint(t *testing.T) {
 	t.Run("gateway-epp falls back to conventional endpoint", func(t *testing.T) {
 		ctx := &validators.Context{Ctx: context.Background(), Clientset: fake.NewClientset()}
 		config := &inferenceWorkloadConfig{namespace: ns, routingMode: inferenceRoutingModeGatewayEPP}
-		if got := resolveInferenceEndpoint(ctx, config); got != defaultGatewayEndpoint() {
+		got, err := resolveInferenceEndpoint(ctx, config)
+		if err != nil {
+			t.Fatalf("resolveInferenceEndpoint() error: %v", err)
+		}
+		if got != defaultGatewayEndpoint() {
 			t.Errorf("resolveInferenceEndpoint() = %q, want %q", got, defaultGatewayEndpoint())
+		}
+	})
+
+	t.Run("gateway-epp surfaces service list errors", func(t *testing.T) {
+		client := fake.NewClientset()
+		client.PrependReactor("list", "services", func(k8stesting.Action) (bool, runtime.Object, error) {
+			return true, nil, stderrors.New("service list denied")
+		})
+		ctx := &validators.Context{Ctx: context.Background(), Clientset: client}
+		config := &inferenceWorkloadConfig{namespace: ns, routingMode: inferenceRoutingModeGatewayEPP}
+		got, err := resolveInferenceEndpoint(ctx, config)
+		if err == nil {
+			t.Fatalf("resolveInferenceEndpoint() = %q, want error", got)
+		}
+		if !strings.Contains(err.Error(), "failed to list inference gateway services") {
+			t.Fatalf("resolveInferenceEndpoint() error = %v, want gateway list context", err)
 		}
 	})
 }
