@@ -220,13 +220,17 @@ license-check: ## Check license is approved
 test-shell: ## Runs shell unit tests (tools/*_test.sh; hermetic, no cluster)
 	@set -e; for t in tools/*_test.sh; do [ -e "$$t" ] || continue; echo "Running $$t..."; bash "$$t"; done
 
+# validators/ tests run as part of `make test` but are excluded from the
+# coverage.out this target emits: per-package coverage there runs 41-92%
+# (see #1752), which would pull the project-wide gate from ~80% to ~75.8%.
 .PHONY: test
 test: test-shell ## Runs unit tests with race detector and coverage (use -short to skip integration tests)
 	@set -e; \
 	echo "Running tests with race detector..."; \
 	KUBEBUILDER_ASSETS=$$(setup-envtest use -p path 2>/dev/null || echo "") \
 	AICR_CRITERIA_STRICT=1 \
-	GOFLAGS="-mod=vendor" go test -short -count=1 -race -timeout=$(TEST_TIMEOUT) -covermode=atomic -coverprofile=coverage.out $$(go list ./... | grep -v -e /tests/chainsaw/ -e /validators) || exit 1; \
+	GOFLAGS="-mod=vendor" go test -short -count=1 -race -timeout=$(TEST_TIMEOUT) -covermode=atomic -coverprofile=coverage.full.out $$(go list ./... | grep -v -e /tests/chainsaw/) || exit 1; \
+	grep -v '^github.com/NVIDIA/aicr/validators/' coverage.full.out > coverage.out; \
 	echo "Test coverage:"; \
 	go tool cover -func=coverage.out | tail -1
 
@@ -656,7 +660,7 @@ changelog-file: ## Updates CHANGELOG.md with changes since the last release
 
 .PHONY: clean
 clean: ## Cleans build artifacts (dist, coverage files, third-party notices)
-	@rm -rf ./dist ./bin ./coverage.out ./THIRD_PARTY_NOTICES.md ./.licenses-cache
+	@rm -rf ./dist ./bin ./coverage.out ./coverage.full.out ./THIRD_PARTY_NOTICES.md ./.licenses-cache
 	@go clean ./...
 	@echo "Cleaned build artifacts"
 
