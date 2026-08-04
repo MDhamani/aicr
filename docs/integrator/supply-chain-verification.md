@@ -55,6 +55,140 @@ export IMAGE_API_DIGEST="${IMAGE_API}@${DIGEST_API}"
 docker login ghcr.io
 ```
 
+## Unified Metadata Retrieval
+
+Every piece of release metadata AICR publishes for a container image is a
+signed in-toto attestation attached to that image as an OCI referrer. There is
+one retrieval command per metadata kind, and each kind has a fixed subject:
+
+| Metadata | Predicate type | Subject | Retrieved with |
+|----------|----------------|---------|----------------|
+| SLSA build provenance | `https://slsa.dev/provenance/v1` | multi-platform index digest | `gh attestation verify` |
+| SPDX SBOM | `https://spdx.dev/Document` | per-platform manifest digest | `cosign verify-attestation --type spdxjson` |
+| OpenVEX | `https://openvex.dev/ns` | multi-platform index digest | `cosign verify-attestation --type openvex` |
+
+The subjects differ because the claims differ. Provenance describes the build
+that produced the whole release image, and the VEX document is a single,
+platform-independent triage record keyed by product PURL, so both belong on the
+index. An SBOM describes exactly one root filesystem, so each platform's SBOM is
+attached to that platform's own manifest digest; querying the index digest for
+an SBOM returns nothing.
+
+Resolve the digests first. `crane digest` without `--platform` returns the index
+digest; with `--platform` it returns that platform's child manifest digest.
+Resolve the platform digests **from the pinned index**, not from the tag: a tag
+repointed between the two lookups would yield a platform digest belonging to a
+different index than the one the provenance and VEX are verified against, and
+a wildcard signer pattern would still accept that other release's validly
+signed SBOM. This is the same resolution the
+[`attest-image-from-tag`](https://github.com/NVIDIA/aicr/blob/main/.github/actions/attest-image-from-tag/action.yml)
+action performs at publication time.
+
+```shell
+export IMAGE="ghcr.io/nvidia/aicr"
+export DIGEST=$(crane digest "${IMAGE}:${TAG}")
+export DIGEST_AMD64=$(crane digest --platform linux/amd64 "${IMAGE}@${DIGEST}")
+export DIGEST_ARM64=$(crane digest --platform linux/arm64 "${IMAGE}@${DIGEST}")
+
+export AICR_ISSUER="https://token.actions.githubusercontent.com"
+# Exact identity, qualified by the release tag. A `refs/tags/.+` regexp would
+# accept any AICR release's signature, which proves only that some NVIDIA/aicr
+# release workflow signed the artifact, not that ${TAG} did.
+export AICR_SIGNER="https://github.com/NVIDIA/aicr/.github/workflows/attest-images.yaml@refs/tags/${TAG}"
+```
+
+Then one command per kind:
+
+```shell
+# Extract under pipefail, and only write a predicate file once the whole
+# pipeline has succeeded. Both halves are needed: `jq` exits 0 on empty input,
+# so without pipefail a failed `cosign verify-attestation` still ends the
+# pipeline with status 0, and the shell truncates a `>` target before cosign
+# ever runs, so a plain redirect would leave a zero-length file that reads as a
+# successful extraction.
+set -o pipefail
+
+# 1. Build provenance (index digest)
+gh attestation verify "oci://${IMAGE}@${DIGEST}" \
+  --repo NVIDIA/aicr \
+  --signer-workflow NVIDIA/aicr/.github/workflows/attest-images.yaml \
+  --source-ref "refs/tags/${TAG}" \
+  --bundle-from-oci
+
+# 2. SPDX SBOM for one platform (per-platform manifest digest)
+sbom_amd64=$(cosign verify-attestation --type spdxjson \
+  --certificate-oidc-issuer "${AICR_ISSUER}" \
+  --certificate-identity "${AICR_SIGNER}" \
+  "${IMAGE}@${DIGEST_AMD64}" \
+  | jq -r '.payload' | base64 -d | jq '.predicate') \
+  && printf '%s\n' "${sbom_amd64}" > sbom-linux-amd64.spdx.json
+
+# 3. OpenVEX vulnerability triage (index digest)
+openvex=$(cosign verify-attestation --type openvex \
+  --certificate-oidc-issuer "${AICR_ISSUER}" \
+  --certificate-identity "${AICR_SIGNER}" \
+  "${IMAGE}@${DIGEST}" \
+  | jq -r '.payload' | base64 -d | jq '.predicate') \
+  && printf '%s\n' "${openvex}" > aicr-openvex.json
+```
+
+Each of the seven released images (`aicr`, `aicrd`, `aicr-gate`, and the four
+`aicr-validators/*` images) carries the same three kinds; substitute the image
+name in `IMAGE` and re-resolve the digests.
+
+**Why `--bundle-from-oci`.** `gh attestation verify` fetches bundles from
+GitHub's attestations API unless told otherwise, so the default form would
+succeed even if the registry referrer push had silently failed. `--bundle-from-oci`
+makes it read the same referrer Cosign reads in commands 2 and 3, which is what
+makes this a single registry-backed retrieval path. Verifying through the API
+instead is a legitimate fallback when the registry is unreachable or
+unauthenticated; the sections below that omit the flag are that API-based
+alternative, and they are labeled as such where they appear.
+
+**Cosign version.** Commands 2 and 3 are Sigstore bundles published through the
+OCI referrers path, which requires **Cosign v3.0.1+**; the same floor the
+Rekor v2 note above sets. Command 1 uses the GitHub CLI and does not involve
+Cosign, so the floor does not apply to it. GHCR does not implement the OCI 1.1
+`/v2/{name}/referrers/{digest}` endpoint, so clients fall back to the
+specification's referrers *tag* schema (a `sha256-{hex}` tag holding an index of
+referrers). Cosign and ORAS do this transparently, which is why the commands
+above are the documented path rather than a raw referrers API call.
+
+### Using the published VEX document
+
+The OpenVEX document records, per CVE, why AICR is not affected: a machine
+readable `status` and `justification` plus a human-readable impact statement
+with the reachability evidence behind the call. Feeding it to your scanner
+suppresses exactly the findings AICR's own release scan suppresses, so a
+downstream gate does not re-flag CVEs that have already been triaged.
+
+```shell
+# Grype: apply the VEX document to a scan of the same image
+grype "${IMAGE}@${DIGEST}" --vex aicr-openvex.json --only-fixed --fail-on high
+
+# Trivy: same document, same effect
+trivy image --vex aicr-openvex.json "${IMAGE}@${DIGEST}"
+```
+
+Statements apply only to products whose PURL matches, so passing the document to
+a scan of an unrelated image is a no-op rather than a blanket suppression. Treat
+the document as evidence, not as an instruction: read the `impact_statement` for
+any CVE your policy cares about and decide whether AICR's reasoning holds for
+your deployment before adopting the suppression.
+
+### Why provenance uses a different signer
+
+Image provenance is produced by `actions/attest-build-provenance` from the
+reusable [`attest-images.yaml`](https://github.com/NVIDIA/aicr/blob/main/.github/workflows/attest-images.yaml)
+workflow, while the SBOM and VEX attestations are produced by `cosign attest` in
+the same job. Unifying all three onto `cosign attest` would make the signer
+identity uniform but would drop the image provenance from SLSA Build Level 3 to
+Level 2: the Level 3 isolation property comes from GitHub's attestation service
+recording the *reusable workflow* as the builder identity, which a caller
+workflow cannot forge. AICR keeps the GitHub attestation flow for provenance for
+that reason. All three land on the same image as OCI referrers regardless, so the
+split affects which verifier you reach for, not where the metadata lives.
+
 ## Verifying Build Provenance (SLSA)
 
 AICR produces SLSA build provenance through GitHub Actions: builds are
@@ -72,6 +206,11 @@ rather than self-asserted, then logged to the public Rekor transparency log.
 > signed with `cosign attest-blob` from the release job and remain Build Level 2.
 
 **Method 1: GitHub CLI**
+
+These commands omit `--bundle-from-oci`, so they are the **API-based
+alternative**: `gh` fetches the bundle from GitHub's attestations API rather
+than from the registry referrer. Add `--bundle-from-oci` to verify the referrer
+itself, as [Unified Metadata Retrieval](#unified-metadata-retrieval) does.
 
 ```shell
 # Verify provenance exists and is valid (using digest)
@@ -183,18 +322,55 @@ curl -LO https://github.com/NVIDIA/aicr/releases/download/${TAG}/aicr_${VERSION}
 cat aicr_${VERSION}_${OS}_${ARCH}.sbom.json
 ```
 
-### Container image SBOM
+Each binary SBOM ships with its own Sigstore bundle,
+`aicr_${VERSION}_${OS}_${ARCH}.sbom.json.sigstore.json`, carrying the release
+run's SLSA provenance over the SBOM document itself. Download it alongside the
+SBOM and verify that NVIDIA CI produced that exact document:
 
 ```shell
-# Method 1: Using Cosign (extracts attestation) - uses digest to avoid warnings
-cosign verify-attestation \
+curl -LO https://github.com/NVIDIA/aicr/releases/download/${TAG}/aicr_${VERSION}_${OS}_${ARCH}.sbom.json.sigstore.json
+
+cosign verify-blob-attestation \
+  --bundle aicr_${VERSION}_${OS}_${ARCH}.sbom.json.sigstore.json \
+  --type https://slsa.dev/provenance/v1 \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity-regexp '^https://github\.com/NVIDIA/aicr/\.github/workflows/on-tag\.yaml@refs/tags/.+$' \
+  aicr_${VERSION}_${OS}_${ARCH}.sbom.json
+```
+
+Binary metadata stays on the GitHub release rather than getting its own OCI
+home: the binaries are distributed as release assets, so a Sigstore bundle
+downloaded next to the asset it covers keeps the artifact and its evidence on a
+single retrieval path. Image metadata lives in the registry for the same reason.
+
+### Container image SBOM
+
+Container image SBOMs are attached **per platform**: each platform's SPDX
+document is an attestation on that platform's manifest digest, not on the
+multi-platform index digest. Resolve the platform digest with
+`crane digest --platform` (see [Unified Metadata Retrieval](#unified-metadata-retrieval))
+before verifying.
+
+```shell
+# pipefail plus the deferred write, for the reason given under
+# Unified Metadata Retrieval: a failed verification must not leave an empty
+# sbom.json behind.
+set -o pipefail
+
+# Resolve from the pinned index (${DIGEST_API}), never from the mutable tag.
+export DIGEST_API_AMD64=$(crane digest --platform linux/amd64 "${IMAGE_API}@${DIGEST_API}")
+
+# Method 1: Using Cosign (extracts attestation) - uses the per-platform digest
+sbom=$(cosign verify-attestation \
   --type spdxjson \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   --certificate-identity-regexp '^https://github\.com/NVIDIA/aicr/\.github/workflows/attest-images\.yaml@refs/tags/.+$' \
-  ${IMAGE_API_DIGEST} | \
-  jq -r '.payload' | base64 -d | jq '.predicate' > sbom.json
+  ${IMAGE_API}@${DIGEST_API_AMD64} | \
+  jq -r '.payload' | base64 -d | jq '.predicate') \
+  && printf '%s\n' "${sbom}" > sbom.json
 
-# Method 2: GitHub CLI (build provenance only; the SPDX SBOM needs Method 1's Cosign flow)
+# Method 2: GitHub CLI (build provenance only; the SPDX SBOM needs Method 1's Cosign flow).
+# Without --bundle-from-oci this reads GitHub's attestations API, not the registry referrer.
 gh attestation verify oci://${IMAGE_API_DIGEST} --repo NVIDIA/aicr --signer-workflow NVIDIA/aicr/.github/workflows/attest-images.yaml --source-ref "refs/tags/${TAG}" --format json
 ```
 
@@ -249,6 +425,9 @@ jq '.creationInfo.created' sbom.json
 
 **Method 1: GitHub CLI (recommended)**
 
+Also the API-based path: append `--bundle-from-oci` to each command to verify
+the registry referrer instead of GitHub's attestations API.
+
 ```shell
 # Verify using digest (preferred - no warnings)
 gh attestation verify oci://${IMAGE_DIGEST} --repo NVIDIA/aicr --signer-workflow NVIDIA/aicr/.github/workflows/attest-images.yaml --source-ref "refs/tags/${TAG}"
@@ -260,22 +439,37 @@ gh attestation verify oci://${IMAGE_API_DIGEST} --repo NVIDIA/aicr --signer-work
 # gh attestation verify oci://ghcr.io/nvidia/aicr:${TAG} --repo NVIDIA/aicr --signer-workflow NVIDIA/aicr/.github/workflows/attest-images.yaml --source-ref "refs/tags/${TAG}"
 ```
 
-**Method 2: Cosign (SBOM attestations)**
+**Method 2: Cosign (SBOM and VEX attestations)**
 
 ```shell
-# Verify SBOM attestation using digest (preferred - avoids warnings)
+# pipefail plus the deferred write, for the reason given under
+# Unified Metadata Retrieval: a failed verification must not leave an empty
+# predicate file behind.
+set -o pipefail
+
+# Verify the SBOM attestation on a per-platform manifest digest,
+# resolved from the pinned index rather than from the mutable tag.
+export DIGEST_AMD64=$(crane digest --platform linux/amd64 "${IMAGE}@${DIGEST}")
 cosign verify-attestation \
   --type spdxjson \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   --certificate-identity-regexp '^https://github\.com/NVIDIA/aicr/\.github/workflows/attest-images\.yaml@refs/tags/.+$' \
-  ${IMAGE_DIGEST}
+  ${IMAGE}@${DIGEST_AMD64}
 
 # Extract and view the SBOM predicate
 cosign verify-attestation \
   --type spdxjson \
   --certificate-oidc-issuer https://token.actions.githubusercontent.com \
   --certificate-identity-regexp '^https://github\.com/NVIDIA/aicr/\.github/workflows/attest-images\.yaml@refs/tags/.+$' \
-  ${IMAGE_DIGEST} | jq -r '.payload' | base64 -d | jq '.predicate'
+  ${IMAGE}@${DIGEST_AMD64} | jq -r '.payload' | base64 -d | jq '.predicate'
+
+# Verify the OpenVEX attestation on the index digest
+openvex=$(cosign verify-attestation \
+  --type openvex \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity-regexp '^https://github\.com/NVIDIA/aicr/\.github/workflows/attest-images\.yaml@refs/tags/.+$' \
+  ${IMAGE_DIGEST} | jq -r '.payload' | base64 -d | jq '.predicate') \
+  && printf '%s\n' "${openvex}" > aicr-openvex.json
 ```
 
 ### CLI binary attestation
