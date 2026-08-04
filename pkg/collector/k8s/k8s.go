@@ -153,6 +153,14 @@ func (k *Collector) Collect(ctx context.Context) (*measurement.Measurement, erro
 
 	// A timeout/cancellation surfaces here; deterministic sub-collector failures
 	// are swallowed inside collectSafe so the snapshot continues on partial failure.
+	//
+	// There is deliberately no cancellation check after this point. Every branch
+	// already checks after its sub-collector returns, so a nil error here means
+	// each one finished its work before any cancellation landed -- the assembled
+	// measurement is complete, and failing it would discard a good snapshot
+	// because the caller happened to cancel on the way out. Note also that
+	// errgroup's Wait cancels gctx before returning, so a gctx check here would
+	// report cancellation unconditionally.
 	if err := g.Wait(); err != nil {
 		return nil, errors.Wrap(errors.ErrCodeTimeout, "K8s collection cancelled", err)
 	}
