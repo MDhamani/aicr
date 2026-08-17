@@ -443,6 +443,232 @@ generated from an externally-decoded recipe reloadable by the file loader. The
 caller's own `RecipeResult` is never mutated, and `APIVersion` is validated but
 never rewritten.
 
+## Verifying artifacts
+
+Every artifact AICR produces can be checked back through the same facade,
+so an integrator never has to reach into `pkg/bundler/verifier`,
+`pkg/evidence/verifier`, or `pkg/recipe/catalog` to establish trust.
+
+### Verifying a bundle
+
+`VerifyBundle` checks a bundle's checksums and attestation chain, then
+evaluates the policy assertions you supply:
+
+```go
+verification, err := client.VerifyBundle(ctx, "./my-bundle", aicr.BundleVerifyOptions{
+	MinTrustLevel:  "verified",
+	RequireCreator: "release@nvidia.com",
+})
+if err != nil {
+	log.Fatal(err) // could not verify: missing bundle, bad trust root, bad options
+}
+if verification.PolicyFailure != "" {
+	log.Fatalf("policy not met: %s", verification.PolicyFailure)
+}
+if len(verification.Report.Errors) > 0 {
+	log.Fatalf("verification failed: %v", verification.Report.Errors)
+}
+log.Printf("trust level %s, created by %s",
+	verification.Report.TrustLevel, verification.Report.BundleCreator)
+```
+
+A failed policy is **data, not an error**: the call still returns the
+full `Report` so you can log or render why the bundle fell short. A
+non-nil error means verification could not run at all.
+
+`MinTrustLevel` is the one field whose empty value is not "no
+constraint". Leaving it empty means `"max"` — auto-detect the highest
+level this bundle could achieve and require it. Naming a level
+explicitly (`aicr.TrustLevels()` returns the valid values) can *lower*
+the floor as readily as raise it.
+
+Verification is offline: the chain resolves against the locally cached
+or embedded Sigstore trusted root. The one network path is a KMS URI in
+`Key`, which makes a live `GetPublicKey` call.
+
+`BundleVerifyOptions` mirrors the [`spec.verify`](../user/cli-config.md#specverify)
+section of an `AICRConfig` field-for-field — the first three fields come from
+`spec.verify.trust`, the next three from `spec.verify.policy` — so a
+team that has standardized on a committed policy can populate this
+struct without a translation table. `IgnoreTLog` deliberately has no
+config counterpart: it drops the transparency-log requirement, and
+keeping it out of the schema means a checked-in file can never silently
+disable that check.
+
+### Verifying evidence
+
+`VerifyEvidence` checks a recipe-evidence bundle's signature and hash
+chain. The input is auto-detected as a pointer file, an OCI reference,
+or an unpacked directory:
+
+```go
+result, err := client.VerifyEvidence(ctx, aicr.EvidenceVerifyOptions{
+	Input: "recipes/evidence/h100-eks-training/eks/sha256-abc.yaml",
+})
+if err != nil {
+	log.Fatal(err) // verification could not be attempted
+}
+
+switch result.Exit {
+case aicr.EvidenceExitValidPassed:
+	log.Printf("valid: %s", result.RecipeName)
+case aicr.EvidenceExitValidPhaseFailures:
+	log.Printf("evidence sound, but recorded phases failed")
+case aicr.EvidenceExitInvalid:
+	log.Fatalf("bundle invalid")
+case aicr.EvidenceExitIncomplete:
+	if result.FailureCause != nil && result.FailureCause.Class == aicr.EvidenceCauseCanceled {
+		log.Fatalf("run canceled before a verdict")
+	}
+	log.Fatalf("could not read the bundle (storage or registry fault)")
+}
+
+fmt.Print(aicr.RenderEvidenceMarkdown(result))
+```
+
+An invalid bundle is a verdict, not an error — branch on `Exit`. The
+`EvidenceExitIncomplete` case is the one worth handling separately: it
+means "we could not check this", which is different from "we checked it
+and it failed".
+
+Pair it with `RecipeDigest` to detect evidence that has gone stale
+against the recipe on your branch:
+
+```go
+current, err := client.RecipeDigest(ctx, aicr.RecipeDigestOptions{
+	Path: "recipes/overlays/h100-eks-training.yaml",
+})
+if err != nil {
+	log.Fatal(err)
+}
+if result.Predicate.Recipe.Digest != current {
+	log.Fatal("evidence is stale: the recipe changed since it was signed")
+}
+```
+
+### Verifying the recipe catalog
+
+`VerifyCatalog` recomputes the deterministic digest over the Client's
+recipe catalog and verifies it against the Sigstore bundle shipped as
+the `recipe-catalog.sigstore.json` release asset:
+
+```go
+catalog, err := client.VerifyCatalog(ctx, "./recipe-catalog.sigstore.json",
+	aicr.CatalogVerifyOptions{})
+if err != nil {
+	log.Fatalf("catalog verification failed: %v", err)
+}
+log.Printf("catalog sha256:%s signed by %s", catalog.Digest, catalog.Identity)
+```
+
+The digest is computed over **this Client's** `DataProvider`, not the
+process-wide embedded catalog. A Client built on `EmbeddedSource()`
+verifies the catalog NVIDIA signed. A Client whose source layers
+external data over the embedded tree is verifying different content, so
+verification will not match the released signature — that is the
+correct answer to "is the catalog I am resolving against the signed
+one", not a bug.
+
+### Verifying the binary
+
+`VerifyBinaryAttestation` proves an `aicr` binary was built by NVIDIA
+CI. It is package-level rather than a `Client` method because it
+involves no recipe catalog and no configurable policy:
+
+```go
+identity, err := aicr.VerifyBinaryAttestation(ctx, aicr.BinaryAttestationVerifyOptions{
+	Attestation:  attestationBytes, // raw Sigstore bundle
+	BinaryDigest: rawSHA256,        // raw bytes, not hex
+})
+```
+
+Passing bytes rather than a path is deliberate: it lets you verify the
+exact content you are about to use, with no verify-then-reread window.
+Override the pinned identity with `IdentityRegexp` (defaults to
+`aicr.TrustedIdentityPattern`); `aicr.ValidateIdentityPattern`
+pre-validates operator-supplied input against the same rule the verify
+entry points apply internally.
+
+An override must be *confined* to the NVIDIA repository, not merely
+mention it. Two rules enforce that, and they are load-bearing together:
+the pattern must **begin with** `https://github.com/NVIDIA/aicr/` (a
+leading `^` is allowed, and `github\.com` is accepted too), and it must
+not use **top-level alternation**. Both exist because the identity
+matcher pins only the OIDC issuer beyond this pattern, so a widened
+pattern silently degrades the gate to "any GitHub Actions workflow in
+any repository" rather than failing visibly.
+
+```go
+// Rejected: begins with the prefix, but the second branch matches
+// anything — only one branch of an alternation has to match.
+aicr.ValidateIdentityPattern(`^https://github\.com/NVIDIA/aicr/.*|.*$`)
+
+// Rejected: the alternation is nested in a group, so the pattern no
+// longer begins with the prefix and one branch escapes the repository.
+aicr.ValidateIdentityPattern(
+	`(https://github.com/NVIDIA/aicr/.*|https://github.com/attacker/x/.*)`)
+
+// Accepted: alternatives sit AFTER the prefix, so every branch is
+// already behind the pin.
+aicr.ValidateIdentityPattern(
+	`^https://github\.com/NVIDIA/aicr/\.github/workflows/(on-tag|release)\.yaml@.*`)
+```
+
+## Signing artifacts
+
+The producing half of the supply chain is on the facade too.
+`EmitRecipeEvidence` builds a bundle from a completed validation run;
+`PublishEvidence` signs and pushes one that already exists on disk:
+
+```go
+err := client.PublishEvidence(ctx, aicr.EvidencePublishOptions{
+	BundleDir: "./out",
+	Push:      "ghcr.io/myorg/aicr-evidence",
+})
+```
+
+Splitting emit from publish lets the cluster-bound step run where the
+cluster is reachable and the Sigstore-bound step run where Fulcio and
+Rekor are. The result is content-identical to the one-shot path.
+
+`SignCatalog` is the counterpart to `VerifyCatalog`, signing this
+Client's catalog and returning the serialized Sigstore bundle.
+
+**`SignCatalog` rejects the signing modes it can tell `VerifyCatalog`
+will not verify** — with one documented exception, below. Verification
+checks against the public-good Sigstore root, requires a
+transparency-log entry, and accepts keyless GitHub OIDC certificates
+only, so these four `OIDCResolve` settings are rejected with
+`ErrCodeInvalidRequest` before any signing work runs:
+
+| Setting | Why it is rejected |
+|---|---|
+| `SigningKey` | A key-signed catalog has no verification path at all. |
+| `FulcioURL` | A private CA's certificate does not chain to the public-good root. |
+| `RekorURL` | A private log's entries do not verify against the public-good root either. A public-good v1 URL would verify, but the two are indistinguishable from the URL alone, so this fails closed. |
+| `DisableTLogUpload` | Verification requires a transparency-log entry. |
+
+The point of the guard is that you should not be able to sign a catalog
+successfully and then discover the documented counterpart refuses it;
+if private catalog signing is ever needed, both halves move together.
+
+**The exception: `SigningConfigPath` is not validated.** It passes
+through because the release path requires it, and a Sigstore signing
+config can itself name a private Fulcio or Rekor — so a signing config
+*can* still produce a catalog `VerifyCatalog` rejects. Treat the guard
+as covering the four settings above, not as a guarantee about every
+input. Each rejected setting exists *only* to depart from the
+public-good defaults, which is what makes rejecting it unambiguous; a
+signing config does not, and rejecting it would break the release.
+Validating the loaded config against the public-good endpoints is the
+principled fix if this exception ever bites.
+
+Neither signing method imposes a facade timeout, unlike their
+verification counterparts: keyless OIDC can block on a human completing
+a browser or device-code flow. Pass a context with a deadline for
+unattended use. Neither prompts — interactive signing disclosure is a UI
+concern the caller owns, so both can run unattended from a server.
+
 ## Errors
 
 All errors returned by the facade are `*pkg/errors.StructuredError`
@@ -465,12 +691,17 @@ if stderrors.As(err, &se) && se.Code == aicrerrors.ErrCodeInvalidRequest {
 ## Context handling
 
 `ResolveRecipe` (and every other context-aware facade method) honours
-context cancellation. Each facade entry point unconditionally wraps the
-caller's context with `context.WithTimeout` against its per-operation
-cap. The effective deadline is the smaller of the caller's deadline
-and the facade cap, per `context.WithTimeout` semantics — a caller
-passing a tighter deadline keeps it; a caller passing
-`context.Background()` gets the facade cap.
+context cancellation. Capped entry points wrap the caller's context
+with `context.WithTimeout` against their per-operation cap; the
+effective deadline is then the smaller of the caller's deadline and the
+facade cap, per `context.WithTimeout` semantics — a caller passing a
+tighter deadline keeps it; a caller passing `context.Background()` gets
+the facade cap.
+
+Not every entry point is capped. `PublishEvidence` and `SignCatalog`
+never are, and `MakeBundle` is not when `BundleOptions.Timeout` is `0`
+(its default). Those run under the caller's context unchanged, so a
+caller passing `context.Background()` gets no deadline at all.
 
 Per-operation caps:
 
@@ -482,6 +713,12 @@ Per-operation caps:
   result retrieval sit outside it, so a bare cap would silently shrink the
   completion budget you asked for.
 - `ValidateState`: `defaults.ValidationOperationTimeout`
+- `VerifyBundle` / `VerifyEvidence` / `VerifyCatalog` / `RecipeDigest`:
+  `defaults.VerifyOperationTimeout`
+- `PublishEvidence` / `SignCatalog`: **no facade cap** — the caller's
+  context governs unchanged. Keyless OIDC can block on a human
+  completing a browser or device-code flow, so a fixed cap would cut
+  short a run that legitimately waits.
 - `MakeBundle`: opt-in via `BundleOptions.Timeout`. When unset (`0`) the
   caller's context governs unchanged — large bundles, `--vendor-charts`,
   and attestation/signing can exceed any fixed cap. The REST `/v1/bundle`

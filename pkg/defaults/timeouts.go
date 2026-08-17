@@ -136,6 +136,33 @@ const (
 	// catalog-vs-facade relationship is asserted in
 	// pkg/validator/catalog/catalog_test.go.
 	ValidationOperationTimeout = 75 * time.Minute
+
+	// VerifyOperationTimeout is the facade-level upper bound for a single
+	// Client.VerifyBundle, Client.VerifyEvidence, Client.VerifyCatalog, or
+	// Client.RecipeDigest call.
+	//
+	// It is an UNCONDITIONAL ceiling, not a fallback for deadline-less
+	// callers: those methods always wrap the caller's context, and
+	// context.WithTimeout takes the smaller of the two. A caller that
+	// deliberately allows 20 minutes for a slow OCI pull is still capped
+	// here. The trade is deliberate — an unbounded verify can hang a
+	// controller reconcile — but it has one sharp edge worth knowing, called
+	// out on Client.VerifyEvidence: a cap breach surfaces as an error, not as
+	// the Incomplete verdict a CI gate uses to tell "could not check this"
+	// from "checked it and it failed".
+	//
+	// Bundle and catalog verification are offline (locally cached or embedded
+	// Sigstore trusted root), so their own work is sub-second; the budget
+	// exists for the two paths that do reach the network — a KMS key URI in
+	// BundleVerifyOptions.Key still makes a live GetPublicKey call, and
+	// VerifyEvidence pulls an OCI artifact when its input is a pointer or a
+	// registry reference.
+	//
+	// Deliberately NOT applied to Client.PublishEvidence or
+	// Client.SignCatalog: keyless signing can block on a human completing a
+	// browser or device-code OIDC flow, so a fixed cap there would cut short
+	// an interactive run that works today.
+	VerifyOperationTimeout = 5 * time.Minute
 )
 
 // Health computation timeouts.
