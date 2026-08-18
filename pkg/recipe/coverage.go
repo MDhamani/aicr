@@ -48,6 +48,23 @@ var coverageDimensions = []coverageDimension{
 	{"platform", func(c *Criteria) string { return string(c.Platform) }},
 }
 
+// CoverageDimensionNames returns the criteria dimension names subject to the
+// coverage post-condition, in canonical (coverageDimensions) order.
+//
+// These are the exact strings that appear as the "dimension" key of each
+// details.uncovered entry on a coverage failure, so a caller acting on that
+// error — clearing the reported dimensions and retrying, as
+// pkg/client/v1's snapshot-criteria relaxation does — can pin its own
+// dimension vocabulary against this list rather than hand-copying it.
+// nodes is absent for the reason given on coverageDimension.
+func CoverageDimensionNames() []string {
+	names := make([]string, 0, len(coverageDimensions))
+	for _, dim := range coverageDimensions {
+		names = append(names, dim.name)
+	}
+	return names
+}
+
 // isSpecifiedCriteriaValue reports whether a criteria field value is
 // explicitly stated ("" and "any" both mean unstated, consistent with
 // MatchesCriteriaField).
@@ -216,12 +233,20 @@ func (s *MetadataStore) verifyCriteriaCoverage(criteria *Criteria, appliedOverla
 	for _, dimName := range uncovered {
 		want := criteriaDimensionValue(criteria, dimName)
 		tuples := s.completionTuplesFor(criteria, dimName, want)
-		onlyExcluded := len(tuples) == 0 && s.excludedOverlayProvides(dimName, want, excluded)
+		// constraintExcluded distinguishes WHY the dimension is uncovered: an
+		// overlay carrying it exists but the observed cluster failed its
+		// constraints, versus no overlay states it at all. Callers that relax
+		// uncovered dimensions and retry (pkg/client/v1) must not relax the
+		// former — doing so converts "your cluster fails this overlay's
+		// requirements" into a broader recipe that silently succeeds.
+		constraintExcluded := s.excludedOverlayProvides(dimName, want, excluded)
+		onlyExcluded := len(tuples) == 0 && constraintExcluded
 		clauses = append(clauses, completionClause(criteria, dimName, want, tuples, onlyExcluded))
 		entries = append(entries, map[string]any{
-			"dimension":        dimName,
-			"requestedValue":   want,
-			"validCompletions": tuples,
+			"dimension":          dimName,
+			"requestedValue":     want,
+			"validCompletions":   tuples,
+			"constraintExcluded": constraintExcluded,
 		})
 	}
 

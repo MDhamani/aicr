@@ -398,12 +398,104 @@ For a per-resolution Slurm accounting mode, use
 `aicr.WithAccountingMode("customer-managed")`. The original criteria and
 snapshot method signatures remain unchanged for source compatibility.
 
+### Criteria relaxation on the snapshot path
+
+A snapshot resolve is strict by default — every criteria dimension you state
+must be honored by an applied overlay, or resolution fails with
+`ErrCodeInvalidRequest` and a `details.uncovered` payload.
+
+That is right for criteria a user typed, but wrong for criteria you *derived*
+from the snapshot fingerprint. An overlay tree can be deliberately agnostic to
+a dimension (Kind's overlays state no `os`) while the fingerprint still detects
+a concrete value on the node — nothing in the recipe distinguishes it, so
+failing there rejects a legitimate query.
+
+Pass `aicr.WithSnapshotCriteriaRelaxation` and name the dimensions **you
+received explicitly**. Anything else is treated as derived, and a coverage
+failure limited to derived dimensions is retried once with those cleared:
+
+```go
+import (
+    aicr "github.com/NVIDIA/aicr/pkg/client/v1"
+
+    // Deriving criteria from a snapshot has no facade-owned helper yet, so
+    // this step reaches past the stable surface — see the caveat below.
+    "github.com/NVIDIA/aicr/pkg/fingerprint" // Internal
+    "github.com/NVIDIA/aicr/pkg/recipe"      // Public (evolving)
+)
+
+criteria := fingerprint.FromMeasurements(snap.Unwrap().Measurements).
+    ToCriteria(client.CriteriaRegistry())
+criteria.Intent = recipe.CriteriaIntentTraining // the user asked for this one
+
+result, err := client.ResolveRecipeFromSnapshotWithOptions(
+    ctx, aicr.WrapCriteria(criteria), snap,
+    aicr.WithSnapshotCriteriaRelaxation(aicr.DimensionIntent))
+if err != nil {
+    log.Fatalf("resolve: %v", err)
+}
+for _, dim := range result.RelaxedDimensions {
+    log.Printf("resolved recipe is broader than requested: %s was relaxed", dim)
+}
+```
+
+> **The fingerprint step is an escape hatch, not stable API.** `pkg/fingerprint`
+> is [Internal](public-api.md#stability-tiers) and may change without notice;
+> `pkg/recipe` is Public (evolving) and may change in a minor bump. Only the
+> `aicr.*` calls above carry the facade's compatibility guarantee. Pin the AICR
+> version and re-audit this block on upgrade, or derive criteria yourself and
+> hand the facade an `*aicr.Criteria`. If you need this without the coupling,
+> say so on [#2016](https://github.com/NVIDIA/aicr/issues/2016) — a facade-owned
+> snapshot-to-criteria helper is the obvious gap it exposes.
+
+Relaxation is deliberately narrow. Three cases propagate the original coverage
+error rather than retrying:
+
+- **A dimension you named.** Relaxing a value the caller asked for would
+  silently resolve a different recipe than requested.
+- **A constraint-excluded dimension.** An overlay carrying it exists, but the
+  observed cluster failed its constraints — a Kubernetes version below the
+  overlay's floor, say. Relaxing there converts "your cluster does not meet
+  this overlay's requirements" into a broader recipe that resolves cleanly,
+  discarding the finding you most need.
+- **A relaxation that would leave no stated coverage dimension.** Such criteria
+  match every overlay and resolve the generic fallback recipe at exit 0 — the
+  fail-open the pre-resolution specificity guard exists to prevent (#1888).
+  Note this is not the same as "criteria is empty": a fingerprint-derived
+  `nodes` value survives the clear, but no overlay gates on `nodes`, so it
+  selects nothing.
+
+The distinction in the second case is *why* the dimension is uncovered: no
+overlay states it at all (safe to relax — nothing in the recipe distinguishes
+the value) versus an overlay states it but was constraint-excluded (not safe).
+The resolver reports which, per dimension, in the coverage error's
+`details.uncovered[].constraintExcluded`.
+
+Two more properties:
+
+- **Passing no dimensions is meaningful,** not a no-op: it means every
+  dimension was derived and all are relaxable. That is the common case for a
+  pure fingerprint query. Presence of the option is what enables the policy, so
+  omitting it entirely is how you keep strict behavior.
+- **It is snapshot-only.** On `ResolveRecipeFromCriteria` there is no
+  fingerprint, so the option is rejected with `ErrCodeInvalidRequest` rather
+  than ignored.
+
+Both attempts share the call's timeout budget, and relaxation happens at most
+once.
+
 The returned `*RecipeResult` carries:
 
 - `Name`, `Version`, `TranslatedAt` — stable identity
 - `Components` — `[]ComponentRef` (Name, Kind, Version, Source, Chart, Namespace)
 - `SelectedProfile` — selected name/value and declaration-wide `OwnedPaths`;
   nil for legacy recipes
+- `RelaxedDimensions` — criteria dimensions cleared by
+  `WithSnapshotCriteriaRelaxation`. Non-empty only when the first attempt failed
+  coverage on derived dimensions **and** the retry succeeded. Every other
+  outcome — option not passed, first attempt succeeded, relaxation refused, or
+  the retry itself failed — yields either an empty slice or `nil, error` with no
+  `RecipeResult` at all, so this field is never the way to detect a failure
 - `Resolved()` — the upstream `*pkg/recipe.RecipeResult` for callers that
   need constraints, deployment order, validation config, or metadata
   (e.g., evidence emission). Do not mutate; do not retain past the
