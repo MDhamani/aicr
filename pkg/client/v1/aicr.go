@@ -34,6 +34,18 @@
 //     already exists and no cluster is needed.
 //   - ValidateState — evaluate a resolved recipe against a snapshot,
 //     running deployment / conformance / performance phases.
+//   - LoadConfig — read and validate the AICRConfig a team commits, from a
+//     file or an HTTP(S) URL. WrapConfig lifts one already parsed elsewhere;
+//     it does no parsing itself. Either way the resulting Config DERIVES
+//     options (Config.BundleVerifyOptions, Config.RecipeSource,
+//     Config.RecipeCriteria, ...) rather than applying them: a Config never
+//     attaches to a Client and is never consulted implicitly, so caller
+//     precedence stays one readable line at the call site.
+//
+// Resolution behavior is tuned per call with RecipeResolveOption —
+// WithProfile, WithAccountingMode, and WithSnapshotCriteriaRelaxation (the
+// relax-and-retry policy behind `aicr recipe --snapshot`, which takes the
+// criteria dimensions the caller stated explicitly and may clear the rest).
 //
 // The supply-chain half covers both producing and checking artifacts:
 //
