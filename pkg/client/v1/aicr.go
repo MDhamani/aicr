@@ -1725,8 +1725,12 @@ func resolveHelmComponentValues(
 // without breaking signatures. CollectSnapshot is therefore safe even
 // on a Client whose recipe source is unrelated to the target cluster.
 //
-// cfg.Kubeconfig is the path (or empty for in-cluster). cfg.Namespace,
-// cfg.Image, cfg.ServiceAccountName must be set; other fields fall
+// cfg.Kubeconfig is the path (or empty for in-cluster). cfg.Namespace and
+// cfg.Image must be set. cfg.JobName and cfg.ServiceAccountName are
+// optional naming prefixes, not required names — leaving them empty is
+// fine: cfg.NameBase (default "aicr") supplies the prefix instead, and
+// cfg.RunID is appended to whichever prefix applies, so every object this
+// call deploys is named uniquely to this run either way. Other fields fall
 // back to package defaults documented on snapshotter.AgentConfig.
 //
 // # Output and delivery
@@ -1784,8 +1788,17 @@ func resolveHelmComponentValues(
 //     carry the appropriate pkg/errors codes (ErrCodeInternal for
 //     deployment failures, ErrCodeTimeout for context expiry, etc.).
 //
-// Concurrent CollectSnapshot calls are safe; each call constructs an
-// independent run.
+// Concurrent CollectSnapshot calls are safe: each gets its own RunID
+// (cfg.RunID when set, otherwise generated) and, from it, its own Job,
+// RBAC, and — when cfg.Output does not name one — its own staging
+// ConfigMap; independence means each call's objects, permissions,
+// captured result, and Cleanup are scoped to that RunID alone, so
+// concurrent runs never collide on a shared resource name or delete
+// something another run created. The one effect that is still shared by
+// design: two calls that set cfg.Output to the SAME explicit
+// cm://namespace/name URI write to that one caller-named ConfigMap and
+// overwrite each other — Output identifies a caller-owned destination,
+// not a run-scoped one, so RunID does not disambiguate it.
 func (c *Client) CollectSnapshot(ctx context.Context, cfg *AgentConfig) (*Snapshot, error) {
 	if c == nil {
 		return nil, errors.New(errors.ErrCodeInvalidRequest, "aicr client not initialized")
