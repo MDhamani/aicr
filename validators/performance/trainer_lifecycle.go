@@ -67,6 +67,11 @@ const (
 	// trainerControllerDeployment is the Deployment name for the Trainer controller-manager.
 	trainerControllerDeployment = "kubeflow-trainer-controller-manager"
 
+	// jobSetControllerDeployment is the JobSet controller-manager Deployment name
+	// emitted by this package's kustomize overlay (see jobSetNameLabel for why
+	// the Helm chart's release-derived name doesn't apply here).
+	jobSetControllerDeployment = "jobset-controller-manager"
+
 	// trainerControllerService is the Service fronting the controller-manager's
 	// webhook port. Without it the admission webhooks have no endpoints and every
 	// TrainJob create is rejected.
@@ -157,6 +162,43 @@ const (
 	// prefix is sufficient to make the controller pullable.
 	jobSetPromotedImageRepo = "registry.k8s.io/jobset/jobset"
 )
+
+// controllerTolerateAll lets a Trainer/JobSet controller-manager Deployment
+// schedule on any node pool, regardless of taints.
+var controllerTolerateAll = []interface{}{
+	map[string]interface{}{keyOperator: "Exists"},
+}
+
+// applyControllerTolerations stamps controllerTolerateAll onto the Trainer and
+// JobSet controller-manager Deployments' pod template, unless one already
+// declares tolerations. Scoped to those two names so an unrelated Deployment
+// in the manifest set never gets a blanket toleration it didn't ask for.
+func applyControllerTolerations(obj *unstructured.Unstructured) error {
+	if obj.GroupVersionKind().Kind != "Deployment" {
+		return nil
+	}
+	switch obj.GetName() {
+	case trainerControllerDeployment, jobSetControllerDeployment:
+	default:
+		return nil
+	}
+
+	if existing, found, err := unstructured.NestedSlice(obj.Object, "spec", "template", "spec", "tolerations"); err != nil {
+		return aicrErrors.Wrap(aicrErrors.ErrCodeInternal,
+			fmt.Sprintf("failed to read tolerations from Deployment %q", obj.GetName()), err)
+	} else if found && len(existing) > 0 {
+		return nil
+	}
+
+	podSpec, found := nestedMap(obj.Object, "spec", "template", "spec")
+	if !found {
+		return aicrErrors.New(aicrErrors.ErrCodeInternal,
+			fmt.Sprintf("pod spec not found in Deployment %q", obj.GetName()))
+	}
+	podSpec["tolerations"] = controllerTolerateAll
+	slog.Info("Applying blanket toleration to controller Deployment", "name", obj.GetName())
+	return nil
+}
 
 // GVRs for the objects the Trainer lifecycle probes and waits on.
 var (
@@ -805,6 +847,9 @@ func decodeTrainerObjects(resources []*resource.Resource) ([]*unstructured.Unstr
 		}
 		if obj.GroupVersionKind().Kind == "" {
 			continue
+		}
+		if tolErr := applyControllerTolerations(obj); tolErr != nil {
+			return nil, tolErr
 		}
 		objs = append(objs, obj)
 	}

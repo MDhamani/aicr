@@ -17,6 +17,8 @@ package main
 import (
 	"strings"
 	"testing"
+
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
 func TestRewriteJobSetStagingImage(t *testing.T) {
@@ -74,5 +76,143 @@ func TestRewriteJobSetStagingImage_PreservesTag(t *testing.T) {
 	want := "image: " + jobSetPromotedImageRepo + ":v0.11.0"
 	if got := string(rewriteJobSetStagingImage([]byte(in))); got != want {
 		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+// deploymentFixture returns a minimal unstructured Deployment, optionally with an
+// existing tolerations list, for exercising applyControllerTolerations.
+func deploymentFixture(name string, existingTolerations []interface{}) *unstructured.Unstructured {
+	podSpec := map[string]interface{}{
+		"containers": []interface{}{
+			map[string]interface{}{"name": "manager", "image": "example/manager:latest"},
+		},
+	}
+	if existingTolerations != nil {
+		podSpec["tolerations"] = existingTolerations
+	}
+	return &unstructured.Unstructured{Object: map[string]interface{}{
+		"apiVersion": "apps/v1",
+		"kind":       "Deployment",
+		"metadata":   map[string]interface{}{"name": name},
+		"spec": map[string]interface{}{
+			"template": map[string]interface{}{
+				"spec": podSpec,
+			},
+		},
+	}}
+}
+
+// TestApplyControllerTolerations covers both controller names, the two
+// mutation-failure paths, and that an unrelated Deployment is left untouched.
+func TestApplyControllerTolerations(t *testing.T) {
+	tests := []struct {
+		name    string
+		obj     *unstructured.Unstructured
+		wantErr bool
+		// wantTolerations is checked only when wantErr is false. nil means "the
+		// tolerations field must not be present at all" (untouched, not merely
+		// empty).
+		wantTolerations []interface{}
+	}{
+		{
+			name: "Trainer controller Deployment with no tolerations gets tolerate-all",
+			obj:  deploymentFixture(trainerControllerDeployment, nil),
+			wantTolerations: []interface{}{
+				map[string]interface{}{"operator": "Exists"},
+			},
+		},
+		{
+			name: "JobSet controller Deployment with no tolerations gets tolerate-all",
+			obj:  deploymentFixture(jobSetControllerDeployment, nil),
+			wantTolerations: []interface{}{
+				map[string]interface{}{"operator": "Exists"},
+			},
+		},
+		{
+			name: "Deployment with existing tolerations is left untouched",
+			obj: deploymentFixture(trainerControllerDeployment, []interface{}{
+				map[string]interface{}{"key": "dedicated", "operator": "Equal", "value": "trainer", "effect": "NoSchedule"},
+			}),
+			wantTolerations: []interface{}{
+				map[string]interface{}{"key": "dedicated", "operator": "Equal", "value": "trainer", "effect": "NoSchedule"},
+			},
+		},
+		{
+			name:            "non-controller Deployment is left untouched",
+			obj:             deploymentFixture("some-other-deployment", nil),
+			wantTolerations: nil,
+		},
+		{
+			name: "non-Deployment resource is left untouched",
+			obj: &unstructured.Unstructured{Object: map[string]interface{}{
+				"apiVersion": "v1",
+				"kind":       "Service",
+				"metadata":   map[string]interface{}{"name": trainerControllerDeployment},
+				"spec":       map[string]interface{}{},
+			}},
+			wantTolerations: nil,
+		},
+		{
+			name: "missing pod spec fails closed",
+			obj: &unstructured.Unstructured{Object: map[string]interface{}{
+				"apiVersion": "apps/v1",
+				"kind":       "Deployment",
+				"metadata":   map[string]interface{}{"name": trainerControllerDeployment},
+				"spec":       map[string]interface{}{},
+			}},
+			wantErr: true,
+		},
+		{
+			name: "malformed tolerations field fails closed",
+			obj: &unstructured.Unstructured{Object: map[string]interface{}{
+				"apiVersion": "apps/v1",
+				"kind":       "Deployment",
+				"metadata":   map[string]interface{}{"name": trainerControllerDeployment},
+				"spec": map[string]interface{}{
+					"template": map[string]interface{}{
+						"spec": map[string]interface{}{
+							// A string, not a slice: NestedSlice's type assertion fails.
+							"tolerations": "not-a-slice",
+						},
+					},
+				},
+			}},
+			wantErr: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := applyControllerTolerations(tt.obj)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if tt.wantErr {
+				return
+			}
+
+			got, found, _ := unstructured.NestedSlice(tt.obj.Object, "spec", "template", "spec", "tolerations")
+			if tt.wantTolerations == nil {
+				if found {
+					t.Errorf("expected no tolerations field, got %v", got)
+				}
+				return
+			}
+			if !found {
+				t.Fatalf("expected tolerations %v, found none", tt.wantTolerations)
+			}
+			if len(got) != len(tt.wantTolerations) {
+				t.Fatalf("got %d toleration(s) %v, want %d %v", len(got), got, len(tt.wantTolerations), tt.wantTolerations)
+			}
+			for i := range got {
+				gotTol, _ := got[i].(map[string]interface{})
+				wantTol, _ := tt.wantTolerations[i].(map[string]interface{})
+				for k, v := range wantTol {
+					if gotTol[k] != v {
+						t.Errorf("toleration[%d][%q] = %v, want %v", i, k, gotTol[k], v)
+					}
+				}
+			}
+		})
 	}
 }

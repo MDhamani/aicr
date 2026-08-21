@@ -1451,7 +1451,7 @@ func applyNCCLWorkerScheduling(obj *unstructured.Unstructured, nodeSelector map[
 			tolList := make([]interface{}, 0, len(tolerations))
 			for _, t := range tolerations {
 				tolMap := map[string]interface{}{
-					"operator": string(t.Operator),
+					keyOperator: string(t.Operator),
 				}
 				if t.Key != "" {
 					tolMap["key"] = t.Key
