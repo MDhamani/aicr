@@ -1,4 +1,4 @@
-# ADR-021: Snapshot Agent Run Isolation
+# ADR-020: Snapshot Agent Run Isolation
 
 ## Status
 
@@ -8,9 +8,10 @@
 ## Decision Summary
 
 Every `aicr snapshot` and `aicr validate` invocation generates a run ID and
-suffixes it onto every Kubernetes object it creates. User-supplied resource
-names are **prefixes**, never exact names, so no object aicr creates can collide
-with another run's.
+suffixes it onto every **run-owned** object. User-supplied resource names are
+**prefixes**, never exact names, so no run-owned object can collide with another
+run's. The Namespace and an explicitly requested output ConfigMap are shared by
+design and are not suffixed.
 
 Object lifecycles fall into exactly three classes — **run-owned**, **ensured**,
 and **delivered** — and every object the snapshot agent touches belongs to one.
@@ -69,6 +70,12 @@ unit tests stay deterministic. The run ID is logged at `slog.Info` on deploy; it
 timestamp prefix makes runs sortable in `kubectl get` output and in orphan
 triage.
 
+**One run ID per invocation.** `aicr validate` both collects a snapshot and
+deploys validation Jobs, and both must carry the same ID. It is generated once at
+the top of the command and passed into collection. Today the two are independent
+— `pkg/cli/validate.go:191` collects, `:265` generates — which would split names,
+labels, logs, and cleanup across two IDs.
+
 ### 2. Every user-supplied name is a prefix
 
 `--job-name`, `--service-account-name`, and their `pkg/config` and SDK
@@ -109,8 +116,10 @@ here.
 | **Ensured** | Namespace | Created if absent, labeled `managed-by`, never deleted, never suffixed. |
 | **Delivered** | Explicit `cm://namespace/name` output ConfigMap | The user's artifact. Written on purpose, never deleted, never suffixed. |
 
-aicr deletes an object if and only if it is run-owned. Exactly one object kind
-falls in each of the other two classes.
+At runtime aicr deletes an object if and only if it is run-owned. Exactly one
+object kind falls in each of the other two classes. `tools/cleanup` sits outside
+this boundary as a developer utility; its name-based removal of the legacy
+`aicr-node-reader` pair is a one-time migration step, not run cleanup.
 
 ### 4. The Namespace stays user-specified
 
@@ -131,12 +140,16 @@ and is not renamed to `aicr-<runID>`:
 ### 5. Pod selection by Job ownership
 
 `Deploy` records the UID returned by the Job `Create`. `findPodName` and
-`findOrWatchPodName` (`wait.go:111-149`) select on
-`app.kubernetes.io/name=aicr,aicr.run/run-id=<runID>`, then reject any pod whose
-`batch.kubernetes.io/controller-uid` does not match. Existing
-`DeletionTimestamp` / `PodFailed` / youngest-first filtering is retained as a
-tiebreaker. The UID is held in an `atomic.Pointer`, since it is written in
-`Deploy` and read from the log-streaming goroutine spawned afterwards.
+`findOrWatchPodName` (`wait.go:111-149`) narrow by
+`app.kubernetes.io/name=aicr,aicr.run/run-id=<runID>`, then confirm ownership.
+Existing `DeletionTimestamp` / `PodFailed` / youngest-first filtering is retained
+as a tiebreaker.
+
+**Ownership must be established from the pod's controlling `ownerReference`, not
+from a label.** Pod labels — `batch.kubernetes.io/controller-uid` included — are
+writable by anything that can update pods in the namespace, so they narrow the
+candidate set but cannot authorize it. The authority is a `controller: true`
+`ownerReference` of kind `Job` carrying the recorded Job UID.
 
 ### 6. Cleanup is ownership-scoped
 
@@ -152,6 +165,10 @@ a new `agent.Config.OwnsOutputConfigMap`. This closes the leak in Problem note 3
 which per-run naming would otherwise turn into one leaked object per run.
 `CheckPermissions` (`permissions.go:48-64`) gains the `configmaps: delete` verb
 this needs.
+
+The staging ConfigMap is created by the in-pod agent, not the controller, so its
+UID is not captured at create time. It must be recorded when the controller reads
+it so its deletion is UID-pinned like every other run-owned object.
 
 ### 7. Labels
 
@@ -203,8 +220,9 @@ selectors whose value now changes per run.
 
 - The documented concurrency contract becomes true, including for SDK callers
   following the current documented example.
-- Every existing invocation still succeeds. No new failure modes, error codes, or
-  flags are introduced.
+- Every existing invocation still succeeds: no new flags, no new user-facing
+  error codes, and no new way for a well-formed command to fail. The one
+  observable behavior change is the ServiceAccount drift noted below.
 - The `aicr validate` / `aicr snapshot` cross-command collision is fixed.
 - Least-privilege improves: a `DiscoverNetwork` run's mutating cluster
   permissions bind to an identity that exists for one run and is revoked at
