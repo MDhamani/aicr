@@ -497,7 +497,8 @@ metadata:
 spec:
   podSelector:
     matchLabels:
-      job-name: aicr
+      app.kubernetes.io/name: aicr
+      app.kubernetes.io/component: snapshot-agent
   policyTypes:
     - Egress
   egress:

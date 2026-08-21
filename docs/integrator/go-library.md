@@ -248,18 +248,18 @@ snapCtx, cancelSnap := context.WithTimeout(context.Background(), 10*time.Minute)
 defer cancelSnap()
 snap, err := client.CollectSnapshot(snapCtx, &aicr.AgentConfig{
 	Kubeconfig: "/path/to/target-kubeconfig",
-	// Namespace, Image, JobName, and ServiceAccountName are all required on
-	// the SDK path. Only Namespace is validated; the rest are copied straight
-	// into the Job and RBAC objects, so an empty value becomes an empty
-	// metadata.name or container image that the API server rejects. The CLI
-	// defaults them from its own flags, which the facade does not share.
-	Namespace:          "aicr-snapshot",
-	Image:              "ghcr.io/nvidia/aicr:v0.19.0",
-	JobName:            "aicr-snapshot",
-	ServiceAccountName: "aicr-agent",
-	Timeout:            5 * time.Minute,
-	Cleanup:            true,
-	AKSGPUPoolsPath:    "/path/to/aks-gpu-pools.json", // AKS only
+	// Namespace is required and validated (it becomes the RBAC/Job namespace
+	// and the internal staging ConfigMap's namespace). Image is not
+	// validated — an empty value becomes an empty container image that the
+	// API server rejects. JobName and ServiceAccountName are optional name
+	// prefixes; leaving them unset defaults both to "aicr" with a generated
+	// run ID appended, so every run gets its own uniquely named Job and
+	// ServiceAccount without the caller having to manage that.
+	Namespace:       "aicr-snapshot",
+	Image:           "ghcr.io/nvidia/aicr:v0.19.0",
+	Timeout:         5 * time.Minute,
+	Cleanup:         true,
+	AKSGPUPoolsPath: "/path/to/aks-gpu-pools.json", // AKS only
 })
 if err != nil {
 	log.Fatalf("collect snapshot: %v", err)
