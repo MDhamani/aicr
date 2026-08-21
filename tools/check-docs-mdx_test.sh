@@ -443,11 +443,14 @@ check_contains   "tab-fence-reported" "bare <word> tag"
 # can reach the checker.
 DIR_CRLF="${TMPDIR_TEST}/crlf"
 mkdir -p "${DIR_CRLF}"
-printf '# CRLF closer\r\n\r\n```\r\ncode\r\n```\r\n\r\nProse with <placeholder> after the block.\r\n' >"${DIR_CRLF}/crlf-closer.md"
+printf '# CRLF closer\r\n\r\n```\r\ncode\r\n```\r\n\r\nProse with <placeholder> after the block.\r\n\r\nAnd a <br> on its own line.\r\n' >"${DIR_CRLF}/crlf-closer.md"
 
 run "${DIR_CRLF}"
 check_rc_nonzero "crlf-closer-exits-nonzero"
 check_contains   "crlf-closer-reopens-prose" "bare <word> tag"
+# <br> covers check 1's own tracker, which carries a separate copy of the CRLF
+# rule; a <word> hazard alone cannot catch a regression there.
+check_contains   "crlf-closer-reopens-void" "non-self-closing void element"
 
 if (( fails > 0 )); then
     echo "${fails} test(s) failed"
