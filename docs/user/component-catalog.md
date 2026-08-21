@@ -366,6 +366,41 @@ storage. So the check catches a stranded upgrade that crosses a
 storage-version boundary, such as the 1.2.0 to 1.3.0 move this pin made, and
 does not catch one within a boundary, such as 1.0.0 to 1.2.0.
 
+**Declining the component.** No stock recipe declares `k8s-aibom` today, so the
+flag applies to a recipe that adds it through a custom overlay — the shape shown
+above. Point `--data` at the directory holding that overlay and generate with
+`--runtime-inventory disabled`:
+
+```bash
+aicr recipe --service gke --accelerator h100 --os cos --intent inference \
+  --data ./my-recipes --runtime-inventory disabled -o recipe.yaml
+```
+
+Passing the flag against a recipe that does not declare the component is an
+error, not a silent no-op:
+
+```console
+$ aicr recipe --service gke --accelerator h100 --os cos --intent inference \
+    --runtime-inventory disabled
+[INVALID_REQUEST] runtime inventory mode "disabled" requires the recipe to
+declare component "k8s-aibom"; this recipe does not resolve it
+```
+
+The selection is recorded in the emitted recipe as
+`configuration.runtimeInventory.mode`, and the component's ref carries
+`install: false`, so the component and its health check are both absent from
+the bundle and from deployment validation. A bundle-time
+`--set k8s-aibom:enabled=false` is **not** equivalent and is not a supported
+way to decline the component: it changes neither the recipe nor its health
+checks, which is why [ADR-019](https://github.com/NVIDIA/aicr/blob/main/docs/design/019-k8s-aibom-runtime-inventory.md)
+rejects it as a selection contract.
+
+A wrong `--service` or a typo therefore surfaces instead of producing a recipe
+that claims a decision it never applied.
+
+The same selection is available in an `AICRConfig` document as
+`spec.recipe.configuration.runtimeInventory.mode`.
+
 **Overriding the chart version requires overriding this assertion.** Assert
 content is static YAML with no templating, so the expected storage version is
 a literal tied to the registry's pinned chart, currently `v1beta1` for chart
