@@ -136,8 +136,10 @@ for file in "${FILES[@]}"; do
         rest = substr($0, RSTART + RLENGTH)
         if (!in_fence) { in_fence = 1; fch = ch; flen = len; next }
         # A closer is the same char, at least as long, and followed only by
-        # whitespace: ```yaml opens a new block, it never closes one.
-        else if (ch == fch && len >= flen && rest ~ /^[ \t]*$/) { in_fence = 0; next }
+        # whitespace: ```yaml opens a new block, it never closes one. The
+        # optional \r keeps a CRLF-terminated closer working; without it the
+        # block never closes and later hazards are silently skipped.
+        else if (ch == fch && len >= flen && rest ~ /^[ \t]*\r?$/) { in_fence = 0; next }
         # else: fence-like line inside a fence of a different char/shorter run
         # is content -> fall through to the in_fence guard below.
       }
@@ -163,8 +165,10 @@ for file in "${FILES[@]}"; do
         rest = substr($0, RSTART + RLENGTH)
         if (!in_fence) { in_fence = 1; fch = ch; flen = len; next }
         # A closer is the same char, at least as long, and followed only by
-        # whitespace: ```yaml opens a new block, it never closes one.
-        else if (ch == fch && len >= flen && rest ~ /^[ \t]*$/) { in_fence = 0; next }
+        # whitespace: ```yaml opens a new block, it never closes one. The
+        # optional \r keeps a CRLF-terminated closer working; without it the
+        # block never closes and later hazards are silently skipped.
+        else if (ch == fch && len >= flen && rest ~ /^[ \t]*\r?$/) { in_fence = 0; next }
         # else: fence-like line inside a fence of a different char/shorter run
         # is content -> fall through to the in_fence guard below.
       }

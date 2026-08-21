@@ -316,6 +316,27 @@ run "${DIR_IND_CLOSE}"
 check_rc_nonzero "indented-closer-exits-nonzero"
 check_contains   "indented-closer-reopens-prose" "bare <word> tag"
 
+# --- Fixture 7b: the inverse — indented opener, column-zero closer. ---
+# Fixture 7 covers opener-0/closer-3; this covers opener-3/closer-0. Both
+# directions are needed: a regression that ties the closer's indent to the
+# opener's (either >= or <=) satisfies one fixture and fails the other, so
+# neither alone pins "the two indents are independent".
+DIR_IND_CLOSE2="${TMPDIR_TEST}/indent-close-inverse"
+mkdir -p "${DIR_IND_CLOSE2}"
+cat >"${DIR_IND_CLOSE2}/indented-opener-flush-closer.md" <<'MD'
+# Indented opener closed at column zero
+
+   ```
+   kubectl get <pod>
+```
+
+Prose after the block with <placeholder> must still be flagged.
+MD
+
+run "${DIR_IND_CLOSE2}"
+check_rc_nonzero "inverse-closer-exits-nonzero"
+check_contains   "inverse-closer-reopens-prose" "bare <word> tag"
+
 # --- Fixture 8: a fence line with an info string never closes a block. ---
 # A closer must be the delimiter followed only by whitespace; ```yaml is an
 # opener. Treating it as a closer ended the block early and scanned the
@@ -413,6 +434,20 @@ printf '# Tab-indented fence\n\n\t```\n\t<pod>\n\t```\n' >"${DIR_TAB}/tab-fence.
 run "${DIR_TAB}"
 check_rc_nonzero "tab-fence-exits-nonzero"
 check_contains   "tab-fence-reported" "bare <word> tag"
+
+# --- Fixture 13: CRLF-terminated closing fence still closes the block. ---
+# awk keeps the \r on a CRLF line, so a bare closer arrives as "```\r". A
+# delimiter-only test that does not tolerate that trailing \r leaves the fence
+# open and silently swallows every hazard after it — a false negative, the
+# dangerous direction. The repo has no text=auto normalization, so a CRLF file
+# can reach the checker.
+DIR_CRLF="${TMPDIR_TEST}/crlf"
+mkdir -p "${DIR_CRLF}"
+printf '# CRLF closer\r\n\r\n```\r\ncode\r\n```\r\n\r\nProse with <placeholder> after the block.\r\n' >"${DIR_CRLF}/crlf-closer.md"
+
+run "${DIR_CRLF}"
+check_rc_nonzero "crlf-closer-exits-nonzero"
+check_contains   "crlf-closer-reopens-prose" "bare <word> tag"
 
 if (( fails > 0 )); then
     echo "${fails} test(s) failed"
