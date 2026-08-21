@@ -276,6 +276,144 @@ run "${DIR_LEN}"
 check_rc_zero  "fence-length-exits-zero"
 check_absent   "fence-length-no-violation" "bare < not starting a valid tag"
 
+# --- Fixture 6: fence opener indented by up to three spaces. ---
+# CommonMark permits a fence opener indented 0-3 spaces (the normal case for a
+# code block nested under a list item). The tracker used to anchor on column 1,
+# so an indented fence never opened and its contents were scanned as prose.
+DIR_IND_OPEN="${TMPDIR_TEST}/indent-open"
+mkdir -p "${DIR_IND_OPEN}"
+cat >"${DIR_IND_OPEN}/indented-opener.md" <<'MD'
+# Indented fence opener
+
+1. Run the command:
+
+   ```
+   kubectl get <pod>
+   ```
+MD
+
+run "${DIR_IND_OPEN}"
+check_rc_zero "indented-opener-exits-zero"
+check_absent  "indented-opener-no-violation" "bare <word> tag"
+
+# --- Fixture 7: closer indented independently of the opener. ---
+# The closing fence may itself be indented 0-3 spaces, and its indent is NOT
+# bounded by the opener's. Both directions must close the block, or the tracker
+# stays open and swallows the rest of the file.
+DIR_IND_CLOSE="${TMPDIR_TEST}/indent-close"
+mkdir -p "${DIR_IND_CLOSE}"
+cat >"${DIR_IND_CLOSE}/indented-closer.md" <<'MD'
+# Closer indent is independent of the opener
+
+```
+kubectl get <pod>
+   ```
+
+Prose after the block with <placeholder> must still be flagged.
+MD
+
+run "${DIR_IND_CLOSE}"
+check_rc_nonzero "indented-closer-exits-nonzero"
+check_contains   "indented-closer-reopens-prose" "bare <word> tag"
+
+# --- Fixture 8: a fence line with an info string never closes a block. ---
+# A closer must be the delimiter followed only by whitespace; ```yaml is an
+# opener. Treating it as a closer ended the block early and scanned the
+# following code lines as prose.
+DIR_INFO="${TMPDIR_TEST}/info-string"
+mkdir -p "${DIR_INFO}"
+cat >"${DIR_INFO}/info-string-closer.md" <<'MD'
+# Info string does not close a fence
+
+```go
+fmt.Println("a")
+```yaml
+key: <value>
+<br>
+```
+MD
+
+run "${DIR_INFO}"
+check_rc_zero "info-string-exits-zero"
+check_absent  "info-string-no-violation" "bare <word> tag"
+# <br> covers check 1's own tracker: it runs a separate copy of the fence
+# logic, so a <word> hazard alone cannot catch a regression there.
+check_absent  "info-string-no-void-violation" "non-self-closing void element"
+
+# --- Fixture 9: indented fence must hide contents from check 1 too. ---
+# Check 1 (void elements) runs its own fence tracker, separate from the one
+# checks 2-6 share. Fixtures 6-8 use bare <word> tags, which only check 5 sees,
+# so they cannot catch a regression in check 1's copy. <br> is a void element,
+# so this fixture exercises that second tracker.
+DIR_VOID_IND="${TMPDIR_TEST}/void-indent"
+mkdir -p "${DIR_VOID_IND}"
+cat >"${DIR_VOID_IND}/void-indented.md" <<'MD'
+# Indented fence hides a void element from check 1
+
+1. Run the command:
+
+   ```
+   <br>
+   ```
+MD
+
+run "${DIR_VOID_IND}"
+check_rc_zero "void-indented-exits-zero"
+check_absent  "void-indented-no-violation" "non-self-closing void element"
+
+# --- Fixture 10: four spaces must NOT open a fence. ---
+# CommonMark caps fence indentation at three spaces (relative to the containing
+# block); at four the construct is an indented code block instead. The tracker
+# must keep that boundary, so a hazard on a four-space "fence" line is still
+# reported rather than silently skipped. This pins the {0,3} bound: widening it
+# turns this fixture red.
+DIR_FOUR="${TMPDIR_TEST}/four-space"
+mkdir -p "${DIR_FOUR}"
+cat >"${DIR_FOUR}/four-space-fence.md" <<'MD'
+# Four spaces is past the fence bound
+
+    ```
+    <pod>
+    ```
+MD
+
+run "${DIR_FOUR}"
+check_rc_nonzero "four-space-exits-nonzero"
+check_contains   "four-space-reported" "bare <word> tag"
+
+# --- Fixture 11: indented tilde fence. ---
+# The indent allowance applies to ~~~ fences as well as ``` fences; only the
+# backtick form is covered above.
+DIR_TILDE_IND="${TMPDIR_TEST}/tilde-indent"
+mkdir -p "${DIR_TILDE_IND}"
+cat >"${DIR_TILDE_IND}/tilde-indented.md" <<'MD'
+# Indented tilde fence
+
+1. Run the command:
+
+   ~~~
+   kubectl get <pod>
+   ~~~
+MD
+
+run "${DIR_TILDE_IND}"
+check_rc_zero "tilde-indented-exits-zero"
+check_absent  "tilde-indented-no-violation" "bare <word> tag"
+
+# --- Fixture 12: a TAB-indented fence is not a fence. ---
+# CommonMark advances a tab to the next four-column tab stop, so a leading tab
+# is already past the three-space bound and the line opens an indented code
+# block, not a fence. Verified against mdast-util-from-markdown: one tab, two
+# tabs, and space+tab all parse as non-fenced. The indent class is therefore
+# spaces only; widening it to [ \t] turns this fixture red.
+DIR_TAB="${TMPDIR_TEST}/tab-fence"
+mkdir -p "${DIR_TAB}"
+printf '# Tab-indented fence\n\n\t```\n\t<pod>\n\t```\n' >"${DIR_TAB}/tab-fence.md"
+
+run "${DIR_TAB}"
+check_rc_nonzero "tab-fence-exits-nonzero"
+check_contains   "tab-fence-reported" "bare <word> tag"
+
 if (( fails > 0 )); then
     echo "${fails} test(s) failed"
     exit 1

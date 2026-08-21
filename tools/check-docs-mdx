@@ -34,8 +34,10 @@
 # Code handling (applies to checks 2-6; check 1 greps the fence-stripped line
 # WITHOUT inline-span stripping): fenced code blocks in BOTH backtick
 # (```) and tilde (~~~) styles are skipped, following CommonMark fence rules —
-# a fence opens on a run of >= 3 of either character and closes only on a later
-# line whose leading run is the SAME character and at least as long. Inline
+# a fence opens on a run of >= 3 of either character, indented by up to three
+# spaces, and closes only on a later line whose leading run is the SAME
+# character, at least as long, and followed by nothing but whitespace (so an
+# info string such as ```yaml opens a block and never closes one). Inline
 # code spans are stripped before scanning; a span opens on a run of N backticks
 # and closes at the next run of exactly N backticks, so spans of any
 # backtick-run length are honored (not just single-backtick spans).
@@ -54,10 +56,12 @@
 # placeholder sharing a line with well-formed JSX, unbalanced expression braces
 # spanning lines, and acorn-level syntax errors.
 #
-# Known code-handling limits (tracked in #2144): a fence opener indented by up
-# to three spaces is not recognized as a fence, and a code span is matched
-# within one line even though CommonMark lets spans cross lines. Both can
-# surface as a false positive here; the parse gate is the arbiter.
+# Known code-handling limit: a code span is matched within one line, even
+# though CommonMark lets a span cross a line break (an opening backtick run on
+# one line closing on a later one). Content between such a break is scanned as
+# prose and can surface as a false positive here. This is a deliberate
+# limitation of a line-based scanner, not an oversight: the parse gate
+# (check-docs-mdx-parse) is the arbiter and will accept the file.
 
 set -euo pipefail
 
@@ -126,10 +130,14 @@ for file in "${FILES[@]}"; do
       ERRORS=$((ERRORS + 1))
     done < <(awk -v fm_end="${FM_END}" '
       NR <= fm_end { next }
-      match($0, /^(`{3,}|~{3,})/) {
-        m = substr($0, RSTART, RLENGTH); ch = substr(m, 1, 1); len = length(m)
+      match($0, /^ {0,3}(`{3,}|~{3,})/) {
+        m = substr($0, RSTART, RLENGTH); sub(/^ +/, "", m)
+        ch = substr(m, 1, 1); len = length(m)
+        rest = substr($0, RSTART + RLENGTH)
         if (!in_fence) { in_fence = 1; fch = ch; flen = len; next }
-        else if (ch == fch && len >= flen) { in_fence = 0; next }
+        # A closer is the same char, at least as long, and followed only by
+        # whitespace: ```yaml opens a new block, it never closes one.
+        else if (ch == fch && len >= flen && rest ~ /^[ \t]*$/) { in_fence = 0; next }
         # else: fence-like line inside a fence of a different char/shorter run
         # is content -> fall through to the in_fence guard below.
       }
@@ -149,10 +157,14 @@ for file in "${FILES[@]}"; do
     # (otherwise violations in later files are silently skipped).
     if ! awk -v fm_end="${FM_END}" '
       NR <= fm_end { next }
-      match($0, /^(`{3,}|~{3,})/) {
-        m = substr($0, RSTART, RLENGTH); ch = substr(m, 1, 1); len = length(m)
+      match($0, /^ {0,3}(`{3,}|~{3,})/) {
+        m = substr($0, RSTART, RLENGTH); sub(/^ +/, "", m)
+        ch = substr(m, 1, 1); len = length(m)
+        rest = substr($0, RSTART + RLENGTH)
         if (!in_fence) { in_fence = 1; fch = ch; flen = len; next }
-        else if (ch == fch && len >= flen) { in_fence = 0; next }
+        # A closer is the same char, at least as long, and followed only by
+        # whitespace: ```yaml opens a new block, it never closes one.
+        else if (ch == fch && len >= flen && rest ~ /^[ \t]*$/) { in_fence = 0; next }
         # else: fence-like line inside a fence of a different char/shorter run
         # is content -> fall through to the in_fence guard below.
       }
