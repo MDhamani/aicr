@@ -19,8 +19,8 @@ A machine-readable **CycloneDX 1.6 JSON** companion to this page is produced by 
 <!-- BEGIN AICR-BOM -->
 ## Summary
 
-- Components: **43**
-- Unique images: **98**
+- Components: **44**
+- Unique images: **99**
 - Distinct registries: **11**
 
 Registries: `602401143452.dkr.ecr.us-west-2.amazonaws.com`, `cr.agentgateway.dev`, `docker.io`, `gcr.io`, `ghcr.io`, `gke.gcr.io`, `nvcr.io`, `public.ecr.aws`, `quay.io`, `registry.k8s.io`, `us-docker.pkg.dev`
@@ -40,6 +40,7 @@ _Rendering fidelity:_ `catalog-parity: charts are rendered with the shared recip
 | cert-manager-ocp-olm | manifest | — | — | 0 |
 | dynamo-platform | helm | dynamo-platform | 1.2.1 | 3 |
 | gatekeeper | helm | gatekeeper/gatekeeper | 3.22.2 | 3 |
+| gke-gb200-rdma | manifest | — | — | 2 |
 | gke-nccl-tcpxo | manifest | — | — | 4 |
 | gpu-operator | helm | nvidia/gpu-operator | v26.3.3 | 15 |
 | gpu-operator-ocp | manifest | — | — | 0 |
@@ -133,6 +134,11 @@ _No images extracted._
 - `curlimages/curl:8.12.0`
 - `openpolicyagent/gatekeeper-crds:v3.22.2`
 - `openpolicyagent/gatekeeper:v3.22.2`
+
+### gke-gb200-rdma
+
+- `gke.gcr.io/pause:3.8@sha256:880e63f94b145e46f1b1082bb71b85e21f16b99b180b9996407d61240ceb9830`
+- `us-docker.pkg.dev/gce-ai-infra/gpudirect-gib/nccl-plugin-gib-arm64:v1.1.2@sha256:6b7950cac6e6833661d4206920f5633b6e361b18bfd5315b63f9bf4a4b84a80e`
 
 ### gke-nccl-tcpxo
 

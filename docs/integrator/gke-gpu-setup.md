@@ -212,7 +212,22 @@ install comes up **driverless** — never combine the label with
 must instead be created with `gpu-driver-version=disabled`, with driver
 provisioning supplied by Google's standalone
 [`nvidia-driver-installer` DaemonSet](https://cloud.google.com/kubernetes-engine/docs/how-to/gpus#installing_drivers)
-applied to the cluster.
+applied to the cluster (**apply it before or right after pool creation**);
+until it lands, nodes come up with no `nvidia` kernel module loaded and the
+GPU Operator's toolkit/driver-validation init containers block waiting for a
+driver that never arrives. On A4X/GB200 (`a4x-highgpu-4g`) nodes, use the
+GB200-specific manifest instead: it adds the node-pool-prerequisite
+`nodeAffinity` check and pins an explicit COS-qualified driver version on top
+of Google's generic upstream DaemonSet; see
+[GKE GB200 Networking › Driver Installer](gke-gb200-networking.md#driver-installer)
+for the full manifest.
+
+Before deploying the rest of the bundle, confirm the driver actually landed:
+`aicr validate --recipe recipe.yaml --phase deployment --fail-fast` runs
+`check-nvidia-smi`, which only needs the GPU nodes to exist, not the rest of
+the bundle deployed, so a missing driver fails in seconds instead of
+surfacing later as the GPU Operator's toolkit/driver-validation init
+containers looping forever.
 
 Set the label when you create the GPU node pool, alongside the disabled
 managed install:
@@ -431,3 +446,4 @@ confirm exactly which advertiser owns each node.
 - [Component Catalog › GKE Device-Plugin Ownership](../user/component-catalog.md#gke-device-plugin-ownership)
 - [Validation readiness gate](../user/validation.md)
 - [GKE TCPXO Networking](gke-tcpxo-networking.md)
+- [GKE GB200 Networking](gke-gb200-networking.md)

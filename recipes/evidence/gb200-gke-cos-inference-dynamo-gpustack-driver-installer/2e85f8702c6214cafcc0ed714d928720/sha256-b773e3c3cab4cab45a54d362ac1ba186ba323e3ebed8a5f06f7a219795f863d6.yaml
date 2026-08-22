@@ -1,0 +1,13 @@
+attestations:
+  - attestedAt: 2026-08-25T18:29:39Z
+    bundle:
+      digest: sha256:b773e3c3cab4cab45a54d362ac1ba186ba323e3ebed8a5f06f7a219795f863d6
+      oci: ghcr.io/mikecook/aicr-evidence:gb200-gke-cos-inference-dynamo-gpustack-driver-installer-b7ab40a9e88f
+      predicateType: https://aicr.run/recipe-evidence/v2
+    signer:
+      identity: 1082845+mikecook@users.noreply.github.com
+      issuer: https://github.com/login/oauth
+      rekorLogIndex: 81150850
+profile: gpuStack=driver-installer
+recipe: gb200-gke-cos-inference-dynamo-gpustack-driver-installer
+schemaVersion: 1.0.0

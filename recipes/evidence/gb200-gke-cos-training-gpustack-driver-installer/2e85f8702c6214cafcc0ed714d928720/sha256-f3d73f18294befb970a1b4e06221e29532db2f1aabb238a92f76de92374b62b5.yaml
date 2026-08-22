@@ -1,0 +1,13 @@
+attestations:
+  - attestedAt: 2026-08-25T16:33:54Z
+    bundle:
+      digest: sha256:f3d73f18294befb970a1b4e06221e29532db2f1aabb238a92f76de92374b62b5
+      oci: ghcr.io/mikecook/aicr-evidence:gb200-gke-cos-training-gpustack-driver-installer-655ec10df65f
+      predicateType: https://aicr.run/recipe-evidence/v2
+    signer:
+      identity: 1082845+mikecook@users.noreply.github.com
+      issuer: https://github.com/login/oauth
+      rekorLogIndex: 80977503
+profile: gpuStack=driver-installer
+recipe: gb200-gke-cos-training-gpustack-driver-installer
+schemaVersion: 1.0.0

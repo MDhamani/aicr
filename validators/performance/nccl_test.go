@@ -960,6 +960,12 @@ func TestSupportedNCCLCombinations_Variants(t *testing.T) {
 			service: recipe.CriteriaServiceOKE,
 			want:    []recipe.CriteriaAcceleratorType{recipe.CriteriaAcceleratorGB200},
 		},
+		{
+			name:    "NVLS GKE GB200",
+			variant: variantNVLS,
+			service: recipe.CriteriaServiceGKE,
+			want:    []recipe.CriteriaAcceleratorType{recipe.CriteriaAcceleratorGB200},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -982,6 +988,10 @@ func TestSupportedNCCLCombinations_Variants(t *testing.T) {
 	}
 	if accels := supportedNCCLCombinations[variantDefault][recipe.CriteriaServiceAny]; len(accels) != 2 {
 		t.Errorf("variantDefault Any count = %d, want 2 (B200, GB200)", len(accels))
+	}
+	wantGKE := []recipe.CriteriaAcceleratorType{recipe.CriteriaAcceleratorH100}
+	if accels := supportedNCCLCombinations[variantDefault][recipe.CriteriaServiceGKE]; !reflect.DeepEqual(accels, wantGKE) {
+		t.Errorf("variantDefault GKE = %v, want %v", accels, wantGKE)
 	}
 	// AKS ND-series H100 runs the default variant over NCCL's built-in
 	// IB/verbs transport (testdata/h100/aks/runtime.yaml).

@@ -133,7 +133,81 @@ func TestH100GKENCCLBandwidthFloor(t *testing.T) {
 					t.Fatalf("performance constraint %q not found; expected value %q", checkName, tt.wantValue)
 				}
 				if gotValue != tt.wantValue {
-					t.Errorf("nccl-all-reduce-bw = %q, want %q", gotValue, tt.wantValue)
+					t.Errorf("%s = %q, want %q", checkName, gotValue, tt.wantValue)
+				}
+			} else {
+				if checkPresent {
+					t.Errorf("performance check %q should be cleared but is present", checkName)
+				}
+				if found {
+					t.Errorf("performance constraint %q should be cleared but resolved to %q", checkName, gotValue)
+				}
+			}
+		})
+	}
+}
+
+// TestGB200GKENCCLBandwidthFloor pins the GKE A4X (NVLS) all-reduce floor
+// on the training leaf. Inference has no NCCL phase.
+func TestGB200GKENCCLBandwidthFloor(t *testing.T) {
+	const checkName = "nccl-all-reduce-bw-nvls"
+
+	tests := []struct {
+		name      string
+		criteria  *Criteria
+		wantValue string
+		wantPerf  bool
+	}{
+		{
+			name: "gb200-gke-cos-training",
+			criteria: &Criteria{
+				Service:     CriteriaServiceGKE,
+				Accelerator: CriteriaAcceleratorGB200,
+				OS:          CriteriaOSCOS,
+				Intent:      CriteriaIntentTraining,
+				Platform:    CriteriaPlatformAny,
+			},
+			wantValue: ">= 250",
+			wantPerf:  true,
+		},
+		{
+			name: "gb200-gke-cos-inference",
+			criteria: &Criteria{
+				Service:     CriteriaServiceGKE,
+				Accelerator: CriteriaAcceleratorGB200,
+				OS:          CriteriaOSCOS,
+				Intent:      CriteriaIntentInference,
+				Platform:    CriteriaPlatformAny,
+			},
+			wantPerf: false,
+		},
+	}
+
+	ctx := context.Background()
+	store, err := loadMetadataStore(ctx)
+	if err != nil {
+		t.Fatalf("loadMetadataStore: %v", err)
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result, err := store.BuildRecipeResult(ctx, tt.criteria)
+			if err != nil {
+				t.Fatalf("BuildRecipeResult: %v", err)
+			}
+
+			gotValue, found := findPerformanceConstraint(result.Validation, checkName)
+			checkPresent := performanceCheckPresent(result.Validation, checkName)
+
+			if tt.wantPerf {
+				if !checkPresent {
+					t.Errorf("performance check %q not present in resolved checks", checkName)
+				}
+				if !found {
+					t.Fatalf("performance constraint %q not found; expected value %q", checkName, tt.wantValue)
+				}
+				if gotValue != tt.wantValue {
+					t.Errorf("%s = %q, want %q", checkName, gotValue, tt.wantValue)
 				}
 			} else {
 				if checkPresent {

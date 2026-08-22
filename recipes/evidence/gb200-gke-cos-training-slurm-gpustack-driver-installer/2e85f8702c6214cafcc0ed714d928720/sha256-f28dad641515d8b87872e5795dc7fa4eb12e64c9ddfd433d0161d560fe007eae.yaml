@@ -1,0 +1,13 @@
+attestations:
+  - attestedAt: 2026-08-25T17:16:35Z
+    bundle:
+      digest: sha256:f28dad641515d8b87872e5795dc7fa4eb12e64c9ddfd433d0161d560fe007eae
+      oci: ghcr.io/mikecook/aicr-evidence:gb200-gke-cos-training-slurm-gpustack-driver-installer-f0afcd1739d7
+      predicateType: https://aicr.run/recipe-evidence/v2
+    signer:
+      identity: 1082845+mikecook@users.noreply.github.com
+      issuer: https://github.com/login/oauth
+      rekorLogIndex: 81038686
+profile: gpuStack=driver-installer
+recipe: gb200-gke-cos-training-slurm-gpustack-driver-installer
+schemaVersion: 1.0.0

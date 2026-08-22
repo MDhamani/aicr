@@ -251,6 +251,7 @@ var supportedNCCLCombinations = map[ncclVariant]map[recipe.CriteriaServiceType][
 	variantNVLS: {
 		recipe.CriteriaServiceEKS: {recipe.CriteriaAcceleratorGB200},
 		recipe.CriteriaServiceOKE: {recipe.CriteriaAcceleratorGB200},
+		recipe.CriteriaServiceGKE: {recipe.CriteriaAcceleratorGB200},
 	},
 }
 
@@ -837,9 +838,9 @@ func applyNCCLResources(ctx *validators.Context, dynamicClient dynamic.Interface
 
 	var instanceType string
 
-	// For GKE, discover GPU NIC network names (cluster-specific prefixes).
-	// Skipped for a recipe-supplied runtime, which owns its own fabric wiring.
-	if customRuntime == "" && service == recipe.CriteriaServiceGKE {
+	// GKE GPU NIC discovery only applies to the TCPXO (gpu-nic-*) fabric;
+	// GB200 uses the gke-gb200-rdma Network CRs instead.
+	if customRuntime == "" && service == recipe.CriteriaServiceGKE && accelerator != recipe.CriteriaAcceleratorGB200 {
 		gpuNICs, err := gkenet.DiscoverGPUNICNetworks(ctx.Ctx, dynamicClient)
 		if err != nil {
 			return aicrErrors.Wrap(aicrErrors.ErrCodeInternal, "failed to discover GKE GPU NIC networks", err)
