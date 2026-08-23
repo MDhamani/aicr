@@ -88,6 +88,15 @@ equivalents are prefixes:
 | ClusterRole / ClusterRoleBinding | `aicr-node-reader-<runID>` |
 | Staging ConfigMap | `aicr-agent-snapshot-<runID>` |
 
+**Why the staging ConfigMap prefix is `aicr-agent-snapshot-`, not `aicr-snapshot-`.**
+`pkg/validator` independently names its own snapshot data ConfigMap
+`aicr-snapshot-<runID>`. Because `aicr validate` hands the *same* run ID to both the
+snapshot agent and the validator, and both resolve to the same namespace, a shared
+`aicr-snapshot-` prefix would put two owners on one object: under `--no-cleanup` the
+validator adopts the agent's ConfigMap and overwrites its data and labels, silently
+replacing the artifact `--no-cleanup` promised to keep. The distinct prefix keeps the
+two subsystems' name spaces disjoint.
+
 Because nothing aicr creates can already exist:
 
 - `ensureJob`'s delete-and-recreate (`job.go:35-55`) and `waitForJobDeletion` are
