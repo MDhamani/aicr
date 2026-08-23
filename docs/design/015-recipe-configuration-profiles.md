@@ -277,13 +277,24 @@ spec:
         componentRefs:
           - name: gcp-driver-installer
             overrides:
-              install: true       # the chart-level gate
+              # Amended 2026-08-22: the gate is the nested installer.enabled,
+              # not the top-level `install` originally drawn here — top-level
+              # `install`/`enabled` are component-PRESENCE gates (IsEnabled),
+              # so a false default would make the component "not enabled in
+              # the surviving composition" and deadlock resolution for every
+              # value; root `overrides.enabled` is separately rejected in
+              # fragments. A nested key is an ordinary owned value path.
+              installer: {enabled: true}
           - name: gpu-operator
             overrides:
               devicePlugin: {enabled: true}
         constraints:
           - name: NodeTopology.gpu-nodes.label
             value: gke-no-default-nvidia-gpu-device-plugin=true
+        # Amended 2026-08-22: the DD5 distinguishing signal is declared
+        # under readinessConstraints (see the DD5 amendment), evaluated by
+        # the validate pre-flight only — it is a property the value's own
+        # deployment creates and cannot exist in a pre-deployment snapshot.
 ```
 
 The GKE declaration lives once in `gke-cos`; accelerator/intent leaves
@@ -1522,3 +1533,34 @@ work that resolves it.
    absence, so the two values stay mutually distinguishable.
    **Proposed: identify a durable signal during the value's adoption;
    the `operator` and `csp-managed` values do not wait on it.**
+
+   *Amended 2026-08-22 (issue #1716).* Two parts land with the value's
+   adoption:
+
+   - **Mechanism.** `ProfileValue` gains `readinessConstraints` — same
+     catalog-load validation as `constraints` with per-phase name
+     deduplication (the same measurement path may carry a generation
+     pre-condition and a readiness post-deployment state — this is
+     exactly the DD5 shape, since both signals here are
+     `NodeTopology.gpu-nodes.label` readings), routed into
+     `spec.validation.readiness.constraints` at resolution and **never
+     evaluated at generation time**. This is required for any
+     post-deployment signal: generation-time evaluation runs against a
+     pre-deployment snapshot in which the signal cannot yet exist, and
+     the overlay-level readiness block cannot vary per value. The
+     `aicr validate` readiness pre-flight evaluates them with the same
+     fail-closed exit as every other readiness gate.
+   - **Signal.** GCP-native labels cannot distinguish the two unmanaged
+     values: both require identical pool shapes
+     (`gpu-driver-version=disabled` + the opt-out label; Google's own
+     installer DaemonSet schedules only where
+     `cloud.google.com/gke-gpu-driver-version` is absent, so a
+     version-labeled pool is unreachable for either). The signal is
+     therefore AICR-owned: the `gcp-driver-installer` DaemonSet stamps
+     a durable node label after a successful install;
+     `operator-selfdriver` asserts it under `readinessConstraints` and
+     `operator` (shipped name `driver-installer`) asserts its absence.
+     Both unmanaged values additionally gain the generation-time
+     constraint `!cloud.google.com/gke-gpu-driver-version`, converting
+     the documented "opt-out label + managed install = driverless
+     pool" misconfiguration into a fail-closed recipe error.

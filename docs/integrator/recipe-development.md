@@ -464,6 +464,19 @@ identical to a sibling's — does not support the "validated against deployed
 config" claim and must not be declared. The snippet above shows the declaration
 shape only; it is not a declaration you should copy into an overlay.
 
+**When the distinguishing signal only exists after deployment**, declare it
+under the value's `readinessConstraints` instead of `constraints`. Both lists
+get the same catalog-load validation (names deduplicate per list; the same
+measurement path may appear in both, carrying a pre-condition at generation
+and a post-deployment state at readiness), but
+`readinessConstraints` are never evaluated at generation time — they route
+into `spec.validation.readiness.constraints` and are evaluated fail closed by
+the `aicr validate` readiness pre-flight. Use this for properties the value's
+own workload creates (e.g. a node label its DaemonSet applies after a
+successful install — ADR-015 Deferred Decision 5), which by construction
+cannot be present in the pre-deployment snapshot that generation-time
+constraints are checked against.
+
 **Constraint names must be measurement paths a supported snapshot producer
 actually emits** — a collector, or a provider projection attached at the
 snapshot orchestration layer (e.g. `K8s.aks-gpu-pools.gpu-driver` from
@@ -473,7 +486,8 @@ snapshot orchestration layer (e.g. `K8s.aks-gpu-pools.gpu-driver` from
 
 **Paths are validated when recipe data is loaded, not when a snapshot is
 evaluated.** Every constraint name in `spec.constraints`,
-`spec.validation.readiness.constraints`, and `spec.profile.values.*.constraints`
+`spec.validation.readiness.constraints`, `spec.profile.values.*.constraints`,
+and `spec.profile.values.*.readinessConstraints`
 is checked against the measurement catalog (`pkg/measurement/catalog.go`) as the
 overlay, mixin, or base file is read. A path the catalog cannot address fails
 the load with the file, the field, and — where there is a near match — a
