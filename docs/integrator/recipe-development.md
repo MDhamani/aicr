@@ -470,7 +470,7 @@ get the same catalog-load validation (names deduplicate per list; the same
 measurement path may appear in both, carrying a pre-condition at generation
 and a post-deployment state at readiness), but
 `readinessConstraints` are never evaluated at generation time — they route
-into `spec.validation.readiness.constraints` and are evaluated fail closed by
+into `spec.validation.readiness.constraints` and are evaluated fail-closed by
 the `aicr validate` readiness pre-flight. Use this for properties the value's
 own workload creates (e.g. a node label its DaemonSet applies after a
 successful install — ADR-015 Deferred Decision 5), which by construction

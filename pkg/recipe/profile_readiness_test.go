@@ -52,7 +52,8 @@ func readinessSpec() *RecipeMetadataSpec {
 
 // TestValidateProfileDeclaration_ReadinessConstraints covers the catalog-load
 // gate for the readiness list: same non-empty rules as generation-time
-// constraints, one shared per-value name namespace across both lists.
+// constraints, with each list deduplicating in its own per-value namespace —
+// the same measurement path may appear in both phases (the DD5 shape).
 func TestValidateProfileDeclaration_ReadinessConstraints(t *testing.T) {
 	base := func(readiness []Constraint, generation []Constraint) *ProfileDeclaration {
 		return &ProfileDeclaration{

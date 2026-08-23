@@ -254,6 +254,11 @@ spec:
         constraints:
           - name: NodeTopology.gpu-nodes.label   # requires #1755
             value: gke-no-default-nvidia-gpu-device-plugin=true
+        # Amended 2026-08-22: DD5 symmetry — this value asserts the
+        # ABSENCE of the installer's ownership marker at readiness.
+        readinessConstraints:
+          - name: NodeTopology.gpu-nodes.label
+            value: "!feature.node.kubernetes.io/gcp-driver-installer"
       # GKE-installed driver AND GKE's managed device plugin — a
       # default-provisioned GKE cluster (no node label required). The
       # declared default: the only value satisfied with zero setup.
@@ -291,10 +296,13 @@ spec:
         constraints:
           - name: NodeTopology.gpu-nodes.label
             value: gke-no-default-nvidia-gpu-device-plugin=true
-        # Amended 2026-08-22: the DD5 distinguishing signal is declared
-        # under readinessConstraints (see the DD5 amendment), evaluated by
-        # the validate pre-flight only — it is a property the value's own
-        # deployment creates and cannot exist in a pre-deployment snapshot.
+        # Amended 2026-08-22: the DD5 distinguishing signal — a property
+        # the value's own deployment creates, absent from any
+        # pre-deployment snapshot — is declared under readinessConstraints
+        # and evaluated by the validate pre-flight only.
+        readinessConstraints:
+          - name: NodeTopology.gpu-nodes.label
+            value: feature.node.kubernetes.io/gcp-driver-installer=true
 ```
 
 The GKE declaration lives once in `gke-cos`; accelerator/intent leaves
@@ -1559,8 +1567,15 @@ work that resolves it.
      therefore AICR-owned: the `gcp-driver-installer` DaemonSet stamps
      a durable node label after a successful install;
      `operator-selfdriver` asserts it under `readinessConstraints` and
-     `operator` (shipped name `driver-installer`) asserts its absence.
-     Both unmanaged values additionally gain the generation-time
-     constraint `!cloud.google.com/gke-gpu-driver-version`, converting
-     the documented "opt-out label + managed install = driverless
-     pool" misconfiguration into a fail-closed recipe error.
+     `operator` (shipped name `driver-installer`) asserts its absence —
+     both declarations land together with the value's adoption (the
+     sketch above shows the declared shape).
+     A further hardening — a generation-time
+     `!cloud.google.com/gke-gpu-driver-version` constraint on both
+     unmanaged values, converting the documented "opt-out label +
+     managed install = driverless pool" misconfiguration into a
+     fail-closed recipe error — is DEFERRED: a value may carry one
+     constraint per measurement path per phase, and
+     `NodeTopology.gpu-nodes.label` is already occupied at generation
+     by the pool-label constraint. It requires a conjunction grammar
+     for the label form, tracked as follow-up work.
