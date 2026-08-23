@@ -86,7 +86,7 @@ equivalents are prefixes:
 | Job | `<job-prefix>-<runID>`, default `aicr` (`aicr-validate` for `aicr validate`) |
 | ServiceAccount, Role, RoleBinding | `<sa-prefix>-<runID>`, default `aicr` |
 | ClusterRole / ClusterRoleBinding | `aicr-node-reader-<runID>` |
-| Staging ConfigMap | `aicr-snapshot-<runID>` |
+| Staging ConfigMap | `aicr-agent-snapshot-<runID>` |
 
 Because nothing aicr creates can already exist:
 
