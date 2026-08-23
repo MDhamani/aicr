@@ -84,6 +84,12 @@ func TestNVSentinelConfigurationMatrix(t *testing.T) {
 			wantAssume: ptr(false),
 		},
 		{
+			name:       "GKE-COS operator-selfdriver: the bundle-carried installer supplies a driver pod",
+			criteria:   gkeCriteria(),
+			profile:    "gpuStack=operator-selfdriver",
+			wantAssume: ptr(false),
+		},
+		{
 			name: "OKE: node image installs the driver (overlay-level, no profile)",
 			criteria: &Criteria{
 				Service:     CriteriaServiceOKE,

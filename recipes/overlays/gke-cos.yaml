@@ -35,9 +35,10 @@ spec:
   # installed and which device plugin advertises nvidia.com/gpu — selected
   # at recipe generation (--profile gpuStack=<value>), recorded in
   # metadata.selectedProfile, and locked at every output boundary. In BOTH
-  # values the driver is Google-supplied: the GPU Operator installs no
-  # driver on COS (an operator-installed driver is the deferred
-  # operator-selfdriver value, issue #1716). This
+  # values the driver arrives outside the GPU Operator, which installs no
+  # driver on COS in any value; under operator-selfdriver the
+  # bundle-carried gcp-driver-installer component (issue #1716) supplies
+  # it. This
   # replaces nothing pre-existing — GKE had no qualified alternative before
   # — but the gke-default value makes the previously unsupported
   # "GKE's managed plugin owns nvidia.com/gpu" state declarable, verifiable
@@ -59,11 +60,10 @@ spec:
   # Operator's device plugin is the sole advertiser.
   #
   # Every leaf GKE-COS overlay inherits this declaration unchanged. The
-  # third ADR value (operator-selfdriver, the AICR-owned GKE
-  # driver-installer component of issue #1716 — distinct from Google's
-  # DaemonSet the driver-installer value is named after) is deliberately
-  # NOT declared: it lands together with its
-  # durable distinguishing signal (ADR-015 Deferred Decision 5).
+  # third ADR value (operator-selfdriver) is declared below together with
+  # its durable distinguishing signal — the NFD ownership marker the
+  # gcp-driver-installer DaemonSet stamps — per ADR-015 Deferred
+  # Decision 5 (issue #1716).
   #
   # nvsentinel.labeler.assumeDriverInstalled is owned per value because driver
   # evidence differs between them (#2181). The NVSentinel labeler infers driver
@@ -92,25 +92,32 @@ spec:
     name: gpuStack
     description: >-
       GPU stack shape for GKE GPU node pools — how the driver is installed
-      and which device plugin advertises nvidia.com/gpu. The driver is
-      Google-supplied in both values; the GPU Operator installs no driver
-      on COS. "gke-default" (the default) is the default-provisioned
-      cluster: GKE's bundled driver install plus GKE's managed device
-      plugin as the advertiser (opt-out label absent everywhere), with the
-      operator's plugin disabled. "driver-installer" runs the GPU
-      Operator's device plugin as the sole advertiser; its verified
-      generation-time constraint is that every GPU node carries
-      gke-no-default-nvidia-gpu-device-plugin=true (the only durable
-      distinguishing signal — ADR-015 DD5). Google's standalone
-      nvidia-driver-installer DaemonSet on pools created with
-      gpu-driver-version=disabled is the documented operational
-      prerequisite that supplies the driver under this value; its
-      presence is not qualified at generation — driver presence is
-      observed by the deployment-phase validation.
+      and which device plugin advertises nvidia.com/gpu. The GPU Operator
+      itself installs no driver on COS in any value. "gke-default" (the
+      default) is the default-provisioned cluster: GKE's bundled driver
+      install plus GKE's managed device plugin as the advertiser (opt-out
+      label absent everywhere), with the operator's plugin disabled.
+      "driver-installer" runs the GPU Operator's device plugin as the sole
+      advertiser; Google's standalone nvidia-driver-installer DaemonSet on
+      pools created with gpu-driver-version=disabled is the documented
+      operational prerequisite that supplies the driver — its presence is
+      not qualified at generation, and its ABSENCE OF an AICR ownership
+      marker is asserted at readiness (ADR-015 DD5).
+      "operator-selfdriver" is the same pool shape with the installer
+      OWNED BY THE BUNDLE: the values-gated gcp-driver-installer component
+      (issue #1716) deploys the same DaemonSet, pins the driver version in
+      the recipe, and stamps the NFD ownership marker
+      feature.node.kubernetes.io/gcp-driver-installer=true that its
+      readiness constraint asserts. driver-installer and operator-selfdriver
+      require identical pool shapes; the marker is the sole durable signal
+      distinguishing them on a running cluster (DD5).
     default: gke-default
     values:
       driver-installer:
         componentRefs:
+          - name: gcp-driver-installer
+            overrides:
+              installer: {enabled: false}
           - name: gpu-operator
             overrides:
               devicePlugin:
@@ -118,6 +125,22 @@ spec:
           - name: nvsentinel
             overrides:
               labeler: {assumeDriverInstalled: false}
+        readinessConstraints:
+          # DD5 symmetry: under this value the driver arrives from an
+          # operator-applied DaemonSet, never from the AICR-owned installer,
+          # so the installer's NFD ownership marker must be absent on every
+          # GPU node. Readiness-scoped: markers are post-deployment state.
+          - name: NodeTopology.gpu-nodes.label
+            value: "!feature.node.kubernetes.io/gcp-driver-installer"
+            remediation: >-
+              A GPU node carries the AICR driver-installer ownership marker,
+              but this recipe was generated with gpuStack=driver-installer
+              (driver supplied by an operator-applied DaemonSet). If the
+              bundle-managed installer owns the driver on this cluster,
+              regenerate with --profile gpuStack=operator-selfdriver;
+              otherwise remove the stale
+              /etc/kubernetes/node-feature-discovery/features.d/gcp-driver-installer
+              feature file from the node (and the DaemonSet that wrote it).
         constraints:
           - name: NodeTopology.gpu-nodes.label
             value: gke-no-default-nvidia-gpu-device-plugin=true
@@ -139,6 +162,62 @@ spec:
               integrator guide (docs/integrator/gke-gpu-setup.md) for the
               full procedure. To use a default-provisioned GKE cluster instead,
               regenerate with the default (--profile gpuStack=gke-default).
+      # Bundle-owned driver install (issue #1716): the same pool shape as
+      # driver-installer (gpu-driver-version=disabled + opt-out label), with
+      # the cos-gpu-installer DaemonSet carried by the gcp-driver-installer
+      # component instead of applied by the operator. The recipe pins the
+      # driver version; upgrades roll with the bundle.
+      operator-selfdriver:
+        componentRefs:
+          - name: gcp-driver-installer
+            overrides:
+              installer: {enabled: true}
+          - name: gpu-operator
+            overrides:
+              devicePlugin:
+                enabled: true
+          # The bundle-carried installer IS a driver pod the NVSentinel
+          # labeler detects — same rationale as driver-installer.
+          - name: nvsentinel
+            overrides:
+              labeler: {assumeDriverInstalled: false}
+        readinessConstraints:
+          # DD5 durable ownership marker: the installer DaemonSet writes an
+          # NFD local feature file after every run; the nfd worker turns it
+          # into this node label. Post-deployment by construction, so it is
+          # readiness-scoped — asserting it at generation would fail closed
+          # on every pre-install cluster.
+          - name: NodeTopology.gpu-nodes.label
+            value: feature.node.kubernetes.io/gcp-driver-installer=true
+            remediation: >-
+              A GPU node is missing the AICR driver-installer ownership
+              marker. The gcp-driver-installer DaemonSet stamps
+              feature.node.kubernetes.io/gcp-driver-installer=true (via an
+              NFD local feature file) after each successful run. Verify the
+              nvidia-driver-installer DaemonSet from THIS bundle is scheduled
+              and Ready on every GPU node (pools must be created with
+              gpu-driver-version=disabled and
+              gke-no-default-nvidia-gpu-device-plugin=true), and that the
+              nfd worker is running. If the driver is instead supplied by an
+              operator-applied DaemonSet, regenerate with
+              --profile gpuStack=driver-installer.
+        constraints:
+          - name: NodeTopology.gpu-nodes.label
+            value: gke-no-default-nvidia-gpu-device-plugin=true
+            remediation: >-
+              The operator-selfdriver profile requires the GPU Operator's
+              device plugin to be the sole nvidia.com/gpu advertiser, so
+              every GPU node pool must carry
+              gke-no-default-nvidia-gpu-device-plugin=true at creation
+              (gcloud container node-pools create ...
+              --node-labels=gke-no-default-nvidia-gpu-device-plugin=true)
+              and be created with gpu-driver-version=disabled — the label
+              forfeits GKE's managed driver install, and the bundle's
+              gcp-driver-installer component supplies the driver instead.
+              See docs/integrator/gke-gpu-setup.md. To use a
+              default-provisioned GKE cluster instead, regenerate with the
+              default (--profile gpuStack=gke-default).
+
       # GKE-installed driver AND GKE's managed device plugin — a
       # default-provisioned GKE cluster (no node label required). The
       # external advertiser is counted as THE nvidia.com/gpu advertiser in
@@ -148,6 +227,9 @@ spec:
       gke-default:
         advertiser: external
         componentRefs:
+          - name: gcp-driver-installer
+            overrides:
+              installer: {enabled: false}
           - name: gpu-operator
             overrides:
               devicePlugin:
@@ -170,14 +252,26 @@ spec:
               regenerate with --profile gpuStack=driver-installer.
 
   componentRefs:
+    # Values-gated driver installer (issue #1716): present unconditionally so
+    # the gpuStack profile may own its installer.enabled gate (a profile can
+    # change how components are configured, never the component set). Renders
+    # nothing except under operator-selfdriver, where it supplies the driver.
+    - name: gcp-driver-installer
+      type: Helm
+      valuesFile: components/gcp-driver-installer/values.yaml
+
     # GKE-COS-specific GPU Operator overrides
-    # GKE preinstalls NVIDIA drivers on COS; disable driver installation.
+    # GKE installs no driver via the GPU Operator on COS; disable driver installation.
     # The GKE ResourceQuota that admits system-*-critical pods is synthesized
     # by the bundler from registry.yaml (gkeCriticalPriority: true); no
     # manifestFiles entry needed here. Issue #915.
     - name: gpu-operator
       type: Helm
       valuesFile: components/gpu-operator/values-gke-cos.yaml
+      # Driver must land before GPU Operator operands start. A no-op
+      # dependency under gke-default / driver-installer (empty release).
+      dependencyRefs:
+        - gcp-driver-installer
 
     # Enable Prometheus persistent storage for GKE (GKE PD CSI is built-in)
     - name: kube-prometheus-stack

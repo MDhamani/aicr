@@ -368,6 +368,45 @@ The three settings cover different parts of the GPU stack:
   AICR's GKE-COS overlays keep `driver.enabled: false` because the GPU
   Operator cannot install a driver on COS node images.
 
+### Alternative: Let the Bundle Carry the Driver Installer
+
+`operator-selfdriver` ([#1716](https://github.com/NVIDIA/aicr/issues/1716))
+uses the same pool shape as `driver-installer` — pools created with
+`gpu-driver-version=disabled` and labeled
+`gke-no-default-nvidia-gpu-device-plugin=true` — but the installer DaemonSet
+ships **inside the bundle** as the `gcp-driver-installer` component instead of
+being applied by hand:
+
+```shell
+aicr recipe --service gke --accelerator h100 --os cos --intent training \
+  --profile gpuStack=operator-selfdriver -o recipe.yaml
+aicr bundle -r recipe.yaml -o ./bundles
+```
+
+What changes versus `driver-installer`:
+
+- **Nothing to apply out-of-band.** The retrofit's "apply the standalone
+  nvidia-driver-installer DaemonSet" step collapses — the bundle carries it,
+  ordered ahead of the GPU Operator.
+- **The driver version is a recipe value.** `gcp-driver-installer.driverVersion`
+  is pinned (default matches the GPU Operator chart's driver pin) and must be
+  COS-qualified: the installer validates the request against the COS build's
+  curated per-GPU-type list and rejects unqualified versions. Version bumps
+  take effect on replaced or rebooted nodes only (the installer skips nodes
+  with a loaded nvidia module).
+- **Ownership is verified.** After each successful run the installer writes an
+  NFD local feature file; the nfd worker turns it into the node label
+  `feature.node.kubernetes.io/gcp-driver-installer=true`. The value's readiness
+  constraint asserts that marker on every GPU node at `aicr validate`, and
+  `driver-installer` symmetrically asserts its absence — the two modes stay
+  mutually distinguishable on a running cluster (ADR-015 DD5).
+
+Do not run both arrangements at once: the bundle's DaemonSet and a hand-applied
+one share the name `nvidia-driver-installer` in `kube-system`, and Helm will
+not adopt the pre-existing object. Migrating from `driver-installer`: delete
+the hand-applied DaemonSet, regenerate with
+`--profile gpuStack=operator-selfdriver`, and deploy the bundle.
+
 ## Troubleshooting
 
 ### Labeled pool comes up driverless

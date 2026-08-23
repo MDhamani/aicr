@@ -184,6 +184,30 @@ components:
       defaultRepository: ""
       defaultNamespace: kube-system
 
+  # GKE COS NVIDIA driver installer (issue #1716): Google's cos-gpu-installer
+  # DaemonSet as an AICR-managed, values-gated component. Present
+  # unconditionally in the gke-cos chain; renders nothing unless the gpuStack
+  # operator-selfdriver profile value flips installer.enabled true. The
+  # DaemonSet carries its own nodeAffinity (GPU nodes without GKE-managed
+  # driver labels), so no nodeSelector injection — only accelerated
+  # tolerations flow through.
+  - name: gcp-driver-installer
+    displayName: gcp-driver-installer
+    valueOverrideKeys:
+      - gcpdriverinstaller
+    healthCheck:
+      assertFile: checks/gcp-driver-installer/health-check.yaml
+    helm:
+      # Manifest-only component - no external Helm chart, uses manifestFiles
+      defaultRepository: ""
+      defaultNamespace: kube-system
+    manifestFiles:
+      - components/gcp-driver-installer/manifests/nvidia-driver-installer.yaml
+    nodeScheduling:
+      accelerated:
+        tolerationPaths:
+          - acceleratedTolerations
+
   - name: aws-efa
     displayName: aws-efa
     valueOverrideKeys:

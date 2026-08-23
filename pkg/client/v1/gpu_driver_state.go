@@ -105,7 +105,10 @@ func driverAbsentRemedy(service recipe.CriteriaServiceType, os recipe.CriteriaOS
 				"gke-no-default-nvidia-gpu-device-plugin=true) the label " +
 				"forfeits the managed install — deploy Google's standalone " +
 				"nvidia-driver-installer DaemonSet and create the pools " +
-				"with gpu-driver-version=disabled instead; see " +
+				"with gpu-driver-version=disabled instead. With --profile " +
+				"gpuStack=operator-selfdriver (same pool shape) the bundle's " +
+				"gcp-driver-installer component carries that DaemonSet and " +
+				"pins the driver version — nothing to deploy by hand; see " +
 				"docs/integrator/gke-gpu-setup.md."
 		case recipe.CriteriaOSUbuntu:
 			// The pinned GPU Operator (v26.3.3) supports driver management

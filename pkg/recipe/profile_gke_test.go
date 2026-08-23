@@ -66,6 +66,13 @@ func TestGKEGpuStackProfileResolution(t *testing.T) {
 			wantAdvertiser: "",
 			wantConstraint: "gke-no-default-nvidia-gpu-device-plugin=true",
 		},
+		{
+			name:           "explicit operator-selfdriver records no advertiser and the positive label predicate",
+			selection:      "gpuStack=operator-selfdriver",
+			wantValue:      "operator-selfdriver",
+			wantAdvertiser: "",
+			wantConstraint: "gke-no-default-nvidia-gpu-device-plugin=true",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -91,6 +98,41 @@ func TestGKEGpuStackProfileResolution(t *testing.T) {
 			owned := selected.OwnedPaths["gpu-operator"]
 			if len(owned) != 2 || owned[0] != "devicePlugin.enabled" || owned[1] != "enabled" {
 				t.Errorf("ownedPaths[gpu-operator] = %v, want [devicePlugin.enabled enabled]", owned)
+			}
+			// The installer's gate and presence are declaration-wide owned
+			// paths (issue #1716): locked for EVERY selection, including the
+			// two values where the component renders nothing.
+			installerOwned := selected.OwnedPaths["gcp-driver-installer"]
+			if len(installerOwned) != 2 || installerOwned[0] != "enabled" || installerOwned[1] != "installer.enabled" {
+				t.Errorf("ownedPaths[gcp-driver-installer] = %v, want [enabled installer.enabled]", installerOwned)
+			}
+			// DD5 symmetry: the two unmanaged values carry the ownership
+			// marker as a readiness constraint — positive under
+			// operator-selfdriver, negated under driver-installer, absent
+			// under gke-default (the marker names installer ownership, which
+			// gke-default does not contest).
+			const markerLabel = "feature.node.kubernetes.io/gcp-driver-installer"
+			var readinessMarker string
+			if result.Validation != nil && result.Validation.Readiness != nil {
+				for _, c := range result.Validation.Readiness.Constraints {
+					if c.Name == "NodeTopology.gpu-nodes.label" {
+						readinessMarker = c.Value
+					}
+				}
+			}
+			switch tt.wantValue {
+			case "operator-selfdriver":
+				if readinessMarker != markerLabel+"=true" {
+					t.Errorf("readiness marker = %q, want %q", readinessMarker, markerLabel+"=true")
+				}
+			case "driver-installer":
+				if readinessMarker != "!"+markerLabel {
+					t.Errorf("readiness marker = %q, want %q", readinessMarker, "!"+markerLabel)
+				}
+			default:
+				if readinessMarker != "" {
+					t.Errorf("readiness marker = %q, want none under gke-default", readinessMarker)
+				}
 			}
 			var found bool
 			for _, c := range result.Constraints {
