@@ -33,9 +33,10 @@
 #
 # Code handling (applies to checks 2-6; check 1 greps the fence-stripped line
 # WITHOUT inline-span stripping): fenced code blocks in BOTH backtick
-# (```) and tilde (~~~) styles are skipped, following CommonMark fence rules —
-# a fence opens on a run of >= 3 of either character, indented by up to three
-# spaces, and closes only on a later line whose leading run is the SAME
+# (```) and tilde (~~~) styles are skipped, following the pinned MDX parser's
+# fence behavior. Unlike CommonMark, MDX has no indented code blocks, so a
+# fence may have any leading spaces or tabs. It opens on a run of >= 3 of either
+# character and closes only on a later line whose leading run is the SAME
 # character, at least as long, and followed by nothing but whitespace (so an
 # info string such as ```yaml opens a block and never closes one). Inline
 # code spans are stripped before scanning; a span opens on a run of N backticks
@@ -119,6 +120,190 @@ frontmatter_end() {
   echo "${end:-0}"
 }
 
+# Shared awk prologue: frontmatter skip + the fence tracker. Check 1 and
+# checks 2-6 run separate awk programs but must agree exactly on what counts
+# as code, so the tracker is defined once here and concatenated into both.
+# Keeping two hand-maintained copies in sync is what let earlier fixes land
+# in one tracker and not the other.
+readonly FENCE_AWK='
+      function indent_width(s,    i, ch, width) {
+        width = 0
+        for (i = 1; i <= length(s); i++) {
+          ch = substr(s, i, 1)
+          if (ch == " ") width++
+          else if (ch == "\t") width += 4 - (width % 4)
+          else break
+        }
+        return width
+      }
+      function column_width(s,    i, ch, width) {
+        width = 0
+        for (i = 1; i <= length(s); i++) {
+          ch = substr(s, i, 1)
+          if (ch == "\t") width += 4 - (width % 4)
+          else width++
+        }
+        return width
+      }
+      function thematic_break(s,    text) {
+        text = s
+        sub(/\r$/, "", text)
+        return text ~ /^[ \t]*(-[ \t]*){3,}$/ ||
+               text ~ /^[ \t]*(\*[ \t]*){3,}$/ ||
+               text ~ /^[ \t]*(_[ \t]*){3,}$/
+      }
+      function setext_underline(s,    text) {
+        text = s
+        sub(/^[ \t]+/, "", text); sub(/\r$/, "", text); sub(/[ \t]+$/, "", text)
+        return text ~ /^(=+|-+)$/
+      }
+      function table_delimiter(s,    text, outer) {
+        text = s
+        sub(/^[ \t]+/, "", text); sub(/\r$/, "", text); sub(/[ \t]+$/, "", text)
+        outer = (text ~ /^\|.*\|$/)
+        gsub(/[ \t]/, "", text)
+        if (text !~ /\|/ && !outer) return 0
+        sub(/^\|/, "", text); sub(/\|$/, "", text)
+        return text ~ /^:?-+:?(\|:?-+:?)*$/
+      }
+      function lazy_text(s,    text, fence_rest) {
+        text = s
+        sub(/^[ \t]+/, "", text)
+        sub(/\r$/, "", text)
+        if (text !~ /[^ \t]/) return 0
+        if (thematic_break(text)) return 0
+        if (text ~ /^(>|#{1,6}([ \t]|$)|~{3,})/) return 0
+        if (match(text, /^`{3,}/)) {
+          fence_rest = substr(text, RSTART + RLENGTH)
+          if (index(fence_rest, "`") == 0) return 0
+        }
+        if (text ~ /^\{/ || text ~ /^<[^ \t]/) return 0
+        if (text ~ /^([-+*]|[0-9]{1,9}[.)])[ \t]+/) return 0
+        return 1
+      }
+      NR <= fm_end { next }
+      # Fence rules shared by both checker passes. Getting any of these wrong
+      # leaves the tracker open and silently skips every later hazard.
+      #   indent: any leading spaces or tabs, matching the MDX parser
+      #   open:   a backtick in the info string makes the line prose, not a
+      #           fence (ambiguous with an inline code span); tildes are exempt
+      #   close:  same char, at least as long, nothing after but whitespace, so
+      #           ```yaml only ever opens; the \r admits a CRLF closer
+      #   scope:  a fence opened inside a list item ends implicitly when a
+      #           nonblank line leaves that item. list_content/fscope carry
+      #           container indents; list_lazy/top_lazy preserve CommonMark
+      #           paragraph continuation lines, and thematic breaks never
+      #           create lists.
+      {
+        blank = ($0 ~ /^[ \t]*\r?$/)
+        ind = indent_width($0)
+        fence_in_marker = 0
+        is_fence = match($0, /^[ \t]*(`{3,}|~{3,})/)
+        if (is_fence) {
+          m = substr($0, RSTART, RLENGTH); sub(/^[ \t]*/, "", m)
+          ch = substr(m, 1, 1); len = length(m)
+          rest = substr($0, RSTART + RLENGTH)
+        }
+
+        # A nonblank outdent ends both the list item and any unclosed fence it
+        # contains. Re-process the boundary line below: it may be prose, a new
+        # list item, or the opener for a following top-level fence.
+        if (in_fence && fscope > 0 && !blank && ind < fscope) {
+          in_fence = 0; fscope = 0
+        }
+
+        if (in_fence) {
+          if (is_fence && ch == fch && len >= flen && rest ~ /^[ \t]*\r?$/) { in_fence = 0; next }
+          next
+        }
+
+        # Maintain just enough list-container state to distinguish an
+        # outdented list-fence boundary from a valid less-indented top-level
+        # closer. CommonMark lazy paragraph lines keep the item open. A blank
+        # ends laziness and also ends an item whose marker had no content.
+        table_continuation = top_table && $0 ~ /\|/
+        if (top_table && !table_continuation) top_table = 0
+        setext_line = top_lazy && setext_underline($0)
+        rejected_marker = 0
+        list_candidate = !setext_line && !table_continuation && !thematic_break($0) && match($0, /^[ \t]*([-+*]|[0-9]{1,9}[.)])([ \t]+|[ \t]*\r?$)/)
+        if (list_candidate) {
+          marker_prefix_len = RLENGTH
+          marker_indent = ind
+          content = substr($0, RSTART + marker_prefix_len)
+          marker = substr($0, 1, marker_prefix_len)
+          sub(/^[ \t]*/, "", marker)
+          match(marker, /^([-+*]|[0-9]{1,9}[.)])/)
+          marker = substr(marker, RSTART, RLENGTH)
+          content_empty = (content ~ /^\r?$/)
+          if (content_empty) {
+            content_indent = marker_indent + length(marker) + 1
+          } else {
+            content_indent = column_width(substr($0, 1, marker_prefix_len))
+          }
+          can_interrupt = !content_empty && (marker !~ /^[0-9]/ || marker + 0 == 1)
+          target_depth = list_depth
+          while (target_depth > 0 && marker_indent < list_content[target_depth] && marker_indent != list_marker[target_depth]) target_depth--
+          continues_list = target_depth > 0 && marker_indent == list_marker[target_depth]
+          paragraph_open = target_depth > 0 ? list_lazy[target_depth] : top_lazy
+          if (!continues_list && paragraph_open && !can_interrupt) {
+            list_candidate = 0; rejected_marker = 1; list_depth = target_depth
+          }
+        }
+        if (list_candidate) {
+          if (match(content, /^(`{3,}|~{3,})/)) {
+            fence_in_marker = 1; is_fence = 1
+            m = substr(content, RSTART, RLENGTH)
+            ch = substr(m, 1, 1); len = length(m)
+            rest = substr(content, RSTART + RLENGTH)
+          }
+          list_depth = target_depth
+          if (list_depth == 0 || marker_indent != list_marker[list_depth]) {
+            if (list_depth > 0) { list_lazy[list_depth] = 0; list_empty[list_depth] = 0 }
+            list_depth++
+          }
+          list_marker[list_depth] = marker_indent
+          list_content[list_depth] = content_indent
+          list_lazy[list_depth] = lazy_text(content)
+          list_empty[list_depth] = content_empty
+          top_lazy = 0; top_pipe = 0; top_table = 0
+        } else if (blank) {
+          while (list_depth > 0 && list_empty[list_depth]) list_depth--
+          for (i = 1; i <= list_depth; i++) list_lazy[i] = 0
+          top_lazy = 0; top_pipe = 0; top_table = 0
+        } else if (rejected_marker) {
+          if (list_depth > 0) {
+            list_empty[list_depth] = 0; list_lazy[list_depth] = 1
+            top_lazy = 0
+          } else {
+            top_lazy = 1; top_pipe = ($0 ~ /\|/)
+          }
+        } else {
+          while (list_depth > 0 && ind < list_content[list_depth] && !(list_lazy[list_depth] && lazy_text($0))) list_depth--
+          if (list_depth > 0) {
+            list_empty[list_depth] = 0
+            if (is_fence && (ch != "`" || index(rest, "`") == 0)) list_lazy[list_depth] = 0
+            else list_lazy[list_depth] = lazy_text($0)
+            top_lazy = 0
+          } else if (table_continuation) {
+            top_lazy = 0; top_pipe = 0
+          } else if (setext_line) {
+            top_lazy = 0; top_pipe = 0
+          } else if (top_lazy && top_pipe && table_delimiter($0)) {
+            top_lazy = 0; top_pipe = 0; top_table = 1
+          } else {
+            top_lazy = lazy_text($0)
+            top_pipe = top_lazy && $0 ~ /\|/
+          }
+        }
+
+        if (is_fence && (ch != "`" || index(rest, "`") == 0)) {
+          in_fence = 1; fch = ch; flen = len
+          fscope = fence_in_marker ? content_indent : ((list_depth > 0 && ind >= list_content[list_depth]) ? list_content[list_depth] : 0)
+          next
+        }
+      }
+'
+
 # --- Check 1: non-self-closing void HTML elements (outside fenced code blocks) ---
 # These must use <tag /> in MDX, not <tag> or <tag attr>.
 VOID_ELEMENTS='img|br|hr|input|source|meta|link|area|base|col|embed|param|track|wbr'
@@ -128,22 +313,7 @@ for file in "${FILES[@]}"; do
       [[ -z "${match}" ]] && continue
       echo "MDX: non-self-closing void element: ${file}:${match}"
       ERRORS=$((ERRORS + 1))
-    done < <(awk -v fm_end="${FM_END}" '
-      NR <= fm_end { next }
-      match($0, /^ {0,3}(`{3,}|~{3,})/) {
-        m = substr($0, RSTART, RLENGTH); sub(/^ +/, "", m)
-        ch = substr(m, 1, 1); len = length(m)
-        rest = substr($0, RSTART + RLENGTH)
-        if (!in_fence) { in_fence = 1; fch = ch; flen = len; next }
-        # A closer is the same char, at least as long, and followed only by
-        # whitespace: ```yaml opens a new block, it never closes one. The
-        # optional \r keeps a CRLF-terminated closer working; without it the
-        # block never closes and later hazards are silently skipped.
-        else if (ch == fch && len >= flen && rest ~ /^[ \t]*\r?$/) { in_fence = 0; next }
-        # else: fence-like line inside a fence of a different char/shorter run
-        # is content -> fall through to the in_fence guard below.
-      }
-      in_fence { next }
+    done < <(awk -v fm_end="${FM_END}" "${FENCE_AWK}"'
       { print NR": "$0 }
     ' "$file" | grep -E "<(${VOID_ELEMENTS})([[:space:]][^>]*)?" | grep -Ev "<(${VOID_ELEMENTS})([[:space:]][^>]*)?[[:space:]]*/>" || true)
 done
@@ -157,22 +327,7 @@ for file in "${FILES[@]}"; do
     # awk exits 1 when it finds a hazard; keep it inside the `if` condition so
     # `set -e` does not abort the whole scan at the first offending file
     # (otherwise violations in later files are silently skipped).
-    if ! awk -v fm_end="${FM_END}" '
-      NR <= fm_end { next }
-      match($0, /^ {0,3}(`{3,}|~{3,})/) {
-        m = substr($0, RSTART, RLENGTH); sub(/^ +/, "", m)
-        ch = substr(m, 1, 1); len = length(m)
-        rest = substr($0, RSTART + RLENGTH)
-        if (!in_fence) { in_fence = 1; fch = ch; flen = len; next }
-        # A closer is the same char, at least as long, and followed only by
-        # whitespace: ```yaml opens a new block, it never closes one. The
-        # optional \r keeps a CRLF-terminated closer working; without it the
-        # block never closes and later hazards are silently skipped.
-        else if (ch == fch && len >= flen && rest ~ /^[ \t]*\r?$/) { in_fence = 0; next }
-        # else: fence-like line inside a fence of a different char/shorter run
-        # is content -> fall through to the in_fence guard below.
-      }
-      in_fence { next }
+    if ! awk -v fm_end="${FM_END}" "${FENCE_AWK}"'
       {
         line = $0
         # Strip inline code spans FIRST so backticked tokens — including a
