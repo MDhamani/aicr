@@ -1,0 +1,34 @@
+# network-operator Helm values for L40S OKE (OCI) SR-IOV RoCE.
+# Hand-rendered from AOR's network-operator/values.yaml.tmpl (provider: oci) +
+# nicclusterpolicy.yaml.tmpl (oci branch, network.type == roce).
+#
+# OCI model (vs Forge IB / Mistral DOCA): NO ofedDriver — OCI bare-metal nodes carry
+# host MOFED, so the GPU Operator uses it via driver.rdma.useHostMofed (set on the
+# l40s-oke-ubuntu leaf). network-operator's job here is the SR-IOV VF device plugin
+# (advertises nvidia.com/mlnxnics RDMA VFs) plus nv-ipam + secondaryNetwork (multus)
+# for RoCE — all supplied by the post-install NicClusterPolicy manifest, NOT the chart.
+#
+# deployCR/nvIpam/secondaryNetwork: AICR's wrapper defaults are on (deployCR: true,
+# nvIpam.enabled: true, secondaryNetwork.deploy: true) — they template the wrapper's
+# own NicClusterPolicy. Turn deployCR off so our manifest CR is authoritative (it is
+# the only place the OCI VF selectors 101a/101e can be expressed); the operator
+# reconciles nv-ipam + secondaryNetwork + sriovDevicePlugin from that CR regardless.
+# nfd.enabled: false — GPU Operator's NFD is used; no second NFD.
+deployCR: false
+nvIpam:
+  enabled: false
+secondaryNetwork:
+  deploy: false
+nfd:
+  enabled: false
+operator:
+  resources:
+    limits:
+      cpu: "1"
+      memory: 2Gi
+    requests:
+      cpu: 500m
+      memory: 2Gi
+  # Operator placement comes from the bundler's system-node scheduling
+  # injection (registry nodeScheduling: operator.nodeSelector /
+  # operator.tolerations) — no hardcoded affinity here.

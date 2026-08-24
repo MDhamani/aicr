@@ -247,6 +247,10 @@ var supportedNCCLCombinations = map[ncclVariant]map[recipe.CriteriaServiceType][
 	},
 	variantNET: {
 		recipe.CriteriaServiceEKS: {recipe.CriteriaAcceleratorGB200},
+		// OKE GB200 NVL72: IB east-west (rdma0-3) via the
+		// rdmaSharedDevicePlugin's nvidia.com/mlnxnics shared HCAs —
+		// see testdata/gb200/oke/runtime-net.yaml.
+		recipe.CriteriaServiceOKE: {recipe.CriteriaAcceleratorGB200},
 	},
 	variantNVLS: {
 		recipe.CriteriaServiceEKS: {recipe.CriteriaAcceleratorGB200},

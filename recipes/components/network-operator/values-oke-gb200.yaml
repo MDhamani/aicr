@@ -1,0 +1,25 @@
+# network-operator Helm values for GB200 OKE (OCI) InfiniBand.
+#
+# OCI GB200 NVL72 model (vs L40S RoCE / Forge IB): NO ofedDriver — nodes carry host
+# MOFED — and no SR-IOV/nv-ipam/multus either. East-west is InfiniBand (rdma0-3),
+# served by rdmaSharedDevicePlugin from the post-install NicClusterPolicy manifest,
+# NOT the chart. deployCR off so that manifest CR is authoritative.
+# nfd.enabled: false — GPU Operator's NFD is used; no second NFD.
+deployCR: false
+nvIpam:
+  enabled: false
+secondaryNetwork:
+  deploy: false
+nfd:
+  enabled: false
+operator:
+  resources:
+    limits:
+      cpu: "1"
+      memory: 2Gi
+    requests:
+      cpu: 500m
+      memory: 2Gi
+  # Operator placement comes from the bundler's system-node scheduling
+  # injection (registry nodeScheduling: operator.nodeSelector /
+  # operator.tolerations) — no hardcoded affinity here.

@@ -100,6 +100,13 @@ var imageDigestExemptions = map[string]string{
 	// Skyhook Package `containerSHA` field (issue #1031), folded into the
 	// extracted image ref as `@sha256:...` by pkg/bom.ExtractImagesFromYAML.
 	"ghcr.io/nvidia/skyhook-packages/shellscript:1.1.1": "Skyhook Package CRD does not accept image digests; tracked via #745 and NVIDIA/nodewright#224",
+
+	// NicClusterPolicy (network-operator OKE): same repository/image/version
+	// triplet schema as the AKS entries above — no digest field in the CRD.
+	"ghcr.io/mellanox/nvidia-k8s-ipam:v0.2.0":                         "NicClusterPolicy CRD does not accept image digests; tracked via #745 and Mellanox/network-operator#2555",
+	"ghcr.io/k8snetworkplumbingwg/multus-cni:v4.2.1":                  "NicClusterPolicy CRD does not accept image digests; tracked via #745 and Mellanox/network-operator#2555",
+	"ghcr.io/k8snetworkplumbingwg/plugins:v1.6.2-update.1":            "NicClusterPolicy CRD does not accept image digests; tracked via #745 and Mellanox/network-operator#2555",
+	"ghcr.io/k8snetworkplumbingwg/sriov-network-device-plugin:v3.9.0": "NicClusterPolicy CRD does not accept image digests; tracked via #745 and Mellanox/network-operator#2555",
 }
 
 // TestComponentManifestImagesAreDigestPinned asserts that every image
