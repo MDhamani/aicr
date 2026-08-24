@@ -1462,9 +1462,10 @@ recurrence — the shape the Problem section expects.
    distinguishing signal is identified (Deferred Decision 5). The other
    two values do not wait on it. The dormant component and the third value
    land **together**, in one event: declaring the value later is an
-   ownership-surface expansion (`install` joins the union and the
-   installer's synthetic `enabled` joins `ownedPaths`), which is a
-   family-wide re-qualification and evidence re-signing event.
+   ownership-surface expansion (`installer.enabled` joins the union, so
+   every existing value gains an assignment for it — the sketch above
+   draws that end state), which is a family-wide re-qualification and
+   evidence re-signing event.
 
    Any dcgm-exporter GPU-ID-mapping adjustment for `csp-managed` is an
    external GKE behavior not verifiable from this repository. It is
