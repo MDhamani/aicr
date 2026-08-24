@@ -13,7 +13,7 @@
 # limitations under the License.
 
 kind: RecipeMetadata
-apiVersion: aicr.run/v1alpha2
+apiVersion: aicr.run/v1alpha3
 metadata:
   name: oke-ol
 
@@ -54,23 +54,14 @@ spec:
                   resources:
                     requests:
                       storage: 50Gi
-    # NVSentinel on OKE: the node image supplies the driver, so no driver pod
-    # exists for the labeler to watch. Without assumeDriverInstalled the
-    # nvsentinel.dgxc.nvidia.com/driver.installed label is never applied and
-    # metadata-collector plus both syslog-health-monitor DaemonSets sit at zero
-    # desired pods — silently, with no error and no event (#2175).
-    #
-    # OKE has no gpuStack profile, so this value is overlay-level and is NOT
-    # profile-owned: it does not receive the generated install-time profile
-    # lock that protects the equivalent AKS and GKE-COS values. The NVSentinel
-    # driver-label bundle gate still rejects bundle-time and declared-dynamic
-    # changes that would recreate #2175, but a manual post-generation edit to
-    # the rendered Helm values is outside that guarantee.
+    # NVSentinel's labeler.assumeDriverInstalled is owned by the gpuStack
+    # profile below (#2175): whether a driver pod exists for the labeler to
+    # watch depends on the selected value, so the polarity is per value —
+    # true where the driver ships in the node image (oci-default,
+    # operator-plugin), false where the operator's driver pod is the
+    # evidence (operator-managed). No overlay-level value here.
     - name: nvsentinel
       type: Helm
-      overrides:
-        labeler:
-          assumeDriverInstalled: true
 
     # OKE DRA driver: host-installed driver root, compute domains enabled
     - name: nvidia-dra-driver-gpu
@@ -80,6 +71,169 @@ spec:
         controller:
           affinity:
             nodeAffinity: null
+
+  # GPU stack shape for OKE GPU node pools (ADR-015). OKE auto-installs
+  # NVIDIA's device plugin on every cluster (per-node opt-out is the
+  # oci.oraclecloud.com/disable-gpu-device-plugin=true node label; removing
+  # the NvidiaGpuPlugin cluster add-on is the API-level equivalent), and
+  # Oracle's GPU node images preinstall the driver, container toolkit, and
+  # host MOFED. Which of those a pool actually has depends on how it was
+  # provisioned — the three values below name the qualified combinations.
+  #
+  # Distinguishing signals are READINESS-scoped (evaluated by the aicr
+  # validate pre-flight, not at generation): the values differ in deployed
+  # ClusterPolicy state (K8s.policy.* readings), which cannot exist in a
+  # pre-deployment snapshot. A generation-time gate on the
+  # disable-gpu-device-plugin node label is tracked as follow-up work — the
+  # gpu-nodes label constraint form's node universe is currently
+  # GKE-specific, and DGXC provisioning removes the add-on without setting
+  # the label.
+  #
+  # Every leaf OKE overlay (OL and Ubuntu) inherits this declaration
+  # unchanged.
+  profile:
+    name: gpuStack
+    description: >-
+      Who installs the GPU driver and which device plugin advertises
+      nvidia.com/gpu on OKE GPU node pools. "oci-default" (the default) is
+      the stock OKE cluster: Oracle's GPU node image supplies the driver and
+      toolkit, and OKE's auto-installed device plugin advertises — the GPU
+      Operator installs none of the three. "operator-plugin" keeps the
+      image-supplied driver and toolkit but the OKE device plugin is
+      disabled (node label or add-on removal), so the GPU Operator's plugin
+      advertises. "operator-managed" is a bring-your-own driverless image:
+      the GPU Operator installs driver, toolkit, and device plugin, and the
+      DRA driver reads the operator install path. MOFED is host-supplied in
+      every value (Oracle and BYO images alike) — network-operator never
+      deploys ofedDriver on OKE.
+    default: oci-default
+    values:
+      # Stock OKE: Oracle GPU image + OKE's auto-installed device plugin.
+      # The external plugin is THE nvidia.com/gpu advertiser in the #1327
+      # exactly-one invariant; the operator's plugin must be off or the two
+      # double-advertise.
+      oci-default:
+        advertiser: external
+        componentRefs:
+          - name: gpu-operator
+            overrides:
+              driver:
+                enabled: false
+                useOpenKernelModules: false
+              toolkit:
+                enabled: false
+              devicePlugin:
+                enabled: false
+              hostPaths:
+                driverInstallDir: /run/nvidia/driver
+          - name: nvidia-dra-driver-gpu
+            overrides:
+              nvidiaDriverRoot: /
+          - name: nvsentinel
+            overrides:
+              labeler: {assumeDriverInstalled: true}
+        readinessConstraints:
+          - name: K8s.policy.driver.enabled
+            value: "false"
+            remediation: >-
+              The deployed ClusterPolicy has the GPU Operator managing the
+              driver, but this recipe was generated with the oci-default
+              profile (image-supplied driver, OKE's device plugin
+              advertising). Regenerate with --profile
+              gpuStack=operator-managed for operator-owned pools, or
+              redeploy the pools with Oracle GPU images.
+          - name: K8s.policy.devicePlugin.enabled
+            value: "false"
+            remediation: >-
+              The GPU Operator's device plugin is enabled while the
+              oci-default profile expects OKE's auto-installed plugin to be
+              the sole nvidia.com/gpu advertiser. Two plugins
+              double-advertise. Regenerate with --profile
+              gpuStack=operator-plugin (or operator-managed) if the OKE
+              plugin is disabled on these pools.
+      # Oracle GPU image driver + the GPU Operator's device plugin: pools
+      # where OKE's auto plugin is disabled (per-node label
+      # oci.oraclecloud.com/disable-gpu-device-plugin=true, or the
+      # NvidiaGpuPlugin add-on removed at the cluster).
+      operator-plugin:
+        componentRefs:
+          - name: gpu-operator
+            overrides:
+              driver:
+                enabled: false
+                useOpenKernelModules: false
+              toolkit:
+                enabled: false
+              devicePlugin:
+                enabled: true
+              hostPaths:
+                driverInstallDir: /run/nvidia/driver
+          - name: nvidia-dra-driver-gpu
+            overrides:
+              nvidiaDriverRoot: /
+          - name: nvsentinel
+            overrides:
+              labeler: {assumeDriverInstalled: true}
+        readinessConstraints:
+          - name: K8s.policy.driver.enabled
+            value: "false"
+            remediation: >-
+              The deployed ClusterPolicy has the GPU Operator managing the
+              driver, but this recipe was generated with the operator-plugin
+              profile (image-supplied driver). Regenerate with --profile
+              gpuStack=operator-managed for operator-owned driver pools.
+          - name: K8s.policy.devicePlugin.enabled
+            value: "true"
+            remediation: >-
+              The GPU Operator's device plugin is disabled while the
+              operator-plugin profile expects it to be the sole
+              nvidia.com/gpu advertiser (OKE's auto plugin disabled on these
+              pools). If the pools still run OKE's plugin, regenerate with
+              the default (--profile gpuStack=oci-default).
+      # Bring-your-own driverless image: the GPU Operator installs driver,
+      # toolkit, and device plugin; the DRA kubelet plugin reads the driver
+      # userspace from the operator install path (TestDriverRootLockstep,
+      # issue #1087).
+      operator-managed:
+        componentRefs:
+          - name: gpu-operator
+            overrides:
+              driver:
+                enabled: true
+                # AOR-aligned: proprietary kernel modules on OKE.
+                useOpenKernelModules: false
+              toolkit:
+                enabled: true
+              devicePlugin:
+                enabled: true
+              hostPaths:
+                driverInstallDir: /run/nvidia/driver
+          - name: nvidia-dra-driver-gpu
+            overrides:
+              nvidiaDriverRoot: /run/nvidia/driver
+          # The operator's driver pod is the labeler's evidence — assuming a
+          # preinstalled driver here would label GPU nodes before the driver
+          # is actually ready.
+          - name: nvsentinel
+            overrides:
+              labeler: {assumeDriverInstalled: false}
+        readinessConstraints:
+          - name: K8s.policy.driver.enabled
+            value: "true"
+            remediation: >-
+              The deployed ClusterPolicy does not have the GPU Operator
+              managing the driver, but this recipe was generated with the
+              operator-managed profile (bring-your-own driverless image).
+              For Oracle GPU images regenerate with the default
+              (--profile gpuStack=oci-default) or operator-plugin.
+          - name: K8s.policy.devicePlugin.enabled
+            value: "true"
+            remediation: >-
+              The GPU Operator's device plugin is disabled while the
+              operator-managed profile expects it to be the sole
+              nvidia.com/gpu advertiser. Regenerate with the default
+              (--profile gpuStack=oci-default) if OKE's auto plugin owns
+              these pools.
 
   validation:
     conformance:

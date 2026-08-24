@@ -358,6 +358,14 @@ values govern advertisement, the #1327 allocation-policy paths are
 closure-locked in addition to the declared owned paths — see
 [GKE GPU setup](../integrator/gke-gpu-setup.md#gpu-device-plugin-ownership) and
 [Component Catalog › GKE Device-Plugin Ownership](component-catalog.md#gke-device-plugin-ownership).
+The OKE family declares `gpuStack` with values `oci-default` (default;
+Oracle's GPU node image supplies the driver and OKE's auto-installed device
+plugin advertises — `advertiser: external`), `operator-plugin` (image driver,
+GPU Operator's plugin advertises; OKE's plugin disabled via the
+`oci.oraclecloud.com/disable-gpu-device-plugin=true` node label or add-on
+removal), and `operator-managed` (bring-your-own driverless image; the
+operator installs driver, toolkit, and plugin, with the DRA driver root in
+lockstep) — see [OKE GPU setup](../integrator/oke-gpu-setup.md).
 Profiles can also be exercised through a versioned external overlay.
 
 Selection and verification are independent: `--profile` (or the default)
@@ -457,7 +465,7 @@ Generate recipes using direct system parameters:
 | `--intent` | | string | Workload intent: training, inference |
 | `--os` | | string | OS family: ubuntu, rhel, cos, amazonlinux, ol, talos |
 | `--platform` | | string | Platform/framework type: dynamo, kubeflow, nim, runai, slurm |
-| `--profile` | | string | Profile selection in exact `name=value` form (e.g. `gpuStack=operator-managed` on AKS or `gpuStack=driver-installer` on GKE); omit to use the declaration's default (`gpuStack=azure-managed` on AKS, `gpuStack=gke-default` on GKE) |
+| `--profile` | | string | Profile selection in exact `name=value` form (e.g. `gpuStack=operator-managed` on AKS/OKE or `gpuStack=driver-installer` on GKE); omit to use the declaration's default (`gpuStack=azure-managed` on AKS, `gpuStack=gke-default` on GKE, `gpuStack=oci-default` on OKE) |
 | `--slurm-accounting-mode` | | string | Slurm accounting ownership: disabled (default), customer-managed, aicr-provided |
 | `--runtime-inventory` | | string | Runtime AI inventory (`k8s-aibom`) selection: `enabled`, `disabled`. Recorded in the generated recipe |
 | `--nodes` | | int | Number of GPU nodes in the cluster |

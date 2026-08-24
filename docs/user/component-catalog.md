@@ -149,15 +149,17 @@ The recipes now carry that value wherever it is needed ([#2181](https://github.c
 | AKS `gpuStack=operator-managed` | the operator's driver pod | `false` | the `gpuStack` profile |
 | GKE COS `gpuStack=gke-default` (default) | none the labeler can observe — the driver is finalized by an init container of GKE's kube-system DaemonSet | `true` | the `gpuStack` profile |
 | GKE COS `gpuStack=driver-installer` | Google's standalone `nvidia-driver-installer` DaemonSet | `false` | the `gpuStack` profile |
-| OKE | none — driver is in the node image | `true` | the overlay (OKE has no profile) |
+| OKE `gpuStack=oci-default` (default) | none — driver is in the node image; OKE's auto plugin advertises | `true` | the `gpuStack` profile |
+| OKE `gpuStack=operator-plugin` | none — driver is in the node image (OKE plugin disabled; operator plugin advertises) | `true` | the `gpuStack` profile |
+| OKE `gpuStack=operator-managed` | the operator's driver pod | `false` | the `gpuStack` profile |
 | EKS | the operator's driver pod | unset (chart default `false`) | — |
 | Kind (nvkind) | none — driver is host-installed | `true` | the overlay (Kind has no profile) |
 
 The explicit `false` on the operator-managed variants is deliberate rather than redundant: it keeps the path profile-owned, so it cannot be flipped into an unsafe hybrid later. Do **not** assume a preinstalled driver where the GPU Operator installs one — skipping detection there would keep the label applied across an unloaded or unhealthy driver.
 
-**NVSentinel is mandatory on the profiled families.** Because the AKS and GKE-COS `gpuStack` profiles name nvsentinel, its presence is profile-owned: `--set nv-sentinel:enabled=false` and a `bundlers=` list that omits it are both rejected on those platforms. That is intended — NVSentinel is a required component for these deployments. It remains optional on platforms with no `gpuStack` profile, such as OKE and EKS.
+**NVSentinel is mandatory on the profiled families.** Because the AKS, GKE-COS, and OKE `gpuStack` profiles name nvsentinel, its presence is profile-owned: `--set nv-sentinel:enabled=false` and a `bundlers=` list that omits it are both rejected on those platforms. That is intended — NVSentinel is a required component for these deployments. It remains optional on platforms with no `gpuStack` profile, such as EKS.
 
-Only AKS and GKE-COS get the install-time profile lock; OKE and Kind set the value at overlay level, so a bundle-time or declared-dynamic change is still rejected by the gate below, but a manual post-generation edit to the rendered Helm values is not.
+AKS, GKE-COS, and OKE get the install-time profile lock; Kind sets the value at overlay level, so a bundle-time or declared-dynamic change is still rejected by the gate below, but a manual post-generation edit to the rendered Helm values is not.
 
 If you do need to set it yourself on an unlisted platform, it is an ordinary override:
 
