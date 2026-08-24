@@ -252,7 +252,8 @@ Resolution enforces these invariants:
 5. Evaluate selected profile constraints fail closed. A missing reading has a
    distinct invalid-request diagnostic; other evaluator failures propagate.
    A value's `readinessConstraints` are exempt from this step by design:
-   they name post-deployment properties (ADR-015 DD5) and route into
+   they name deployment-created properties (e.g. deployed ClusterPolicy
+   state — the OKE gpuStack family's distinguishers) and route into
    `spec.validation.readiness.constraints`, where the `aicr validate`
    readiness pre-flight evaluates them fail closed. Names deduplicate
    per phase — the same measurement path may carry a generation-time

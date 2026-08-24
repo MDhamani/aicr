@@ -213,10 +213,13 @@ target state, gated by this rule.
 
 ```yaml
 # recipes/overlays/gke-cos.yaml — device-plugin ownership
-# Shown with the post-DD5 value set. DD5's durable marker, not yet
-# identified, will additionally land as symmetric constraints on
-# operator and operator-selfdriver at that event — the constraints
-# drawn here are therefore not yet the declarable post-DD5 state.
+# Shown with the post-DD5 value set as originally drawn. Amended
+# 2026-08-24: DD5 was resolved by WITHDRAWING the ambiguous sibling
+# rather than marking it — the shipped family is gke-default plus
+# bundle-installer (the drawn operator-selfdriver), and no durable
+# marker or symmetric constraint pair exists. The operator value drawn
+# below shipped as driver-installer in v0.19.0 and was withdrawn when
+# bundle-installer landed.
 spec:
   profile:
     name: gpuStack
@@ -254,11 +257,10 @@ spec:
         constraints:
           - name: NodeTopology.gpu-nodes.label   # requires #1755
             value: gke-no-default-nvidia-gpu-device-plugin=true
-        # Amended 2026-08-22: DD5 symmetry — this value asserts the
-        # ABSENCE of the installer's ownership marker at readiness.
-        readinessConstraints:
-          - name: NodeTopology.gpu-nodes.label
-            value: "!feature.node.kubernetes.io/gcp-driver-installer"
+        # Amended 2026-08-24: this value shipped as driver-installer in
+        # v0.19.0 and was WITHDRAWN when bundle-installer landed — the
+        # hand-applied installer arrangement is a migration source, not a
+        # named mode (see the DD5 amendment).
       # GKE-installed driver AND GKE's managed device plugin — a
       # default-provisioned GKE cluster (no node label required). The
       # declared default: the only value satisfied with zero setup.
@@ -296,13 +298,10 @@ spec:
         constraints:
           - name: NodeTopology.gpu-nodes.label
             value: gke-no-default-nvidia-gpu-device-plugin=true
-        # Amended 2026-08-22: the DD5 distinguishing signal — a property
-        # the value's own deployment creates, absent from any
-        # pre-deployment snapshot — is declared under readinessConstraints
-        # and evaluated by the validate pre-flight only.
-        readinessConstraints:
-          - name: NodeTopology.gpu-nodes.label
-            value: feature.node.kubernetes.io/gcp-driver-installer=true
+        # Amended 2026-08-24: no readiness marker. DD5 was resolved by
+        # withdrawing the operator (driver-installer) sibling; this value
+        # shipped as bundle-installer, distinguishable from csp-managed
+        # (gke-default) at generation time by the pool label alone.
 ```
 
 The GKE declaration lives once in `gke-cos`; accelerator/intent leaves
@@ -316,9 +315,10 @@ step 2 describes. Selection:
 # gke-default (declared default; drawn above as csp-managed) — no flag needed
 aicr recipe --service gke --os cos --accelerator h100 --intent inference
 
-# explicit alternative configuration (shipped name; drawn above as operator)
+# explicit alternative configuration (shipped name; drawn above as
+# operator-selfdriver)
 aicr recipe --service gke --os cos --accelerator h100 --intent inference \
-  --profile gpuStack=driver-installer
+  --profile gpuStack=bundle-installer
 ```
 
 A profile fragment may reference only components **enabled in the
@@ -343,7 +343,8 @@ explicit toggles from changing the pre-existing presence state, with
 subset-filter semantics defined under Override locking.
 
 **Conditional installation is expressible in v1 through a values-gated
-component** — the `operator-selfdriver` value above is the pattern.
+component** — the `operator-selfdriver` value above (shipped as
+`bundle-installer`) is the pattern.
 The component sits unconditionally in the composition and renders
 nothing unless its gate value is selected; the profile value flips a
 plain values path — owned, locked, and validated like any other —
@@ -1476,13 +1477,27 @@ recurrence — the shape the Problem section expects.
    installer's synthetic `enabled` joins `ownedPaths`), which is a
    family-wide re-qualification and evidence re-signing event.
 
+   *Amended 2026-08-24 (issue #1716).* The landing event resolved DD5 by
+   **withdrawing the ambiguous sibling instead of marking it**: the
+   deferred value shipped as `bundle-installer` (the `gcp-driver-installer`
+   component carries the installer; nested gate `installer.enabled` — see
+   the gate-key correction in the sketch), and `driver-installer` (shipped
+   in v0.19.0) was removed in the same event. The two remaining values are
+   distinguishable at generation time by the opt-out pool label alone
+   (positive vs negated), so no post-deployment marker exists on GKE.
+   Selecting `gpuStack=driver-installer` after the event fails closed with
+   the valid-values list; the migration is: delete any hand-applied
+   `nvidia-driver-installer` DaemonSet (the bundle's DaemonSet shares its
+   name) and regenerate with `--profile gpuStack=bundle-installer`.
+
    Any dcgm-exporter GPU-ID-mapping adjustment for `csp-managed` is an
    external GKE behavior not verifiable from this repository. It is
    verified and added during this step if required, with upstream
    citations recorded in that PR. Before conversion, this step also
    checks the family's `/v1` usage or announces a deprecation window so
    clients do not discover the `/v1` rejection at cut-over.
-4. Other consumers: once `operator-selfdriver` is declared, internal
+4. Other consumers: once `operator-selfdriver` (shipped as
+   `bundle-installer`) is declared, internal
    recipes (DGXC/NKX) migrate the cos-gpu-installer arrangement
    (internal MR #27) to the public value. The values-gated
    `gcp-driver-installer` component makes the case expressible without
@@ -1514,8 +1529,8 @@ work that resolves it.
    GKE's managed driver install, so the standalone gate's prerequisite
    needed the profile's per-value pairing), and the GKE `gpuStack`
    profile now consumes the form per selected value (#1761 rollout
-   PR 3): positive for `driver-installer`, negated for the
-   `gke-default` default.
+   PR 3): positive for `driver-installer` (later `bundle-installer`),
+   negated for the `gke-default` default.
 3. **AKS node-pool-mode signal — resolved by the 2026-07-27 amendment.**
    The provider-facing AgentPool `gpuProfile.driver` property is the
    durable ownership marker. AKS adoption projects it into a snapshot
@@ -1542,40 +1557,40 @@ work that resolves it.
    **Proposed: identify a durable signal during the value's adoption;
    the `operator` and `csp-managed` values do not wait on it.**
 
-   *Amended 2026-08-22 (issue #1716).* Two parts land with the value's
-   adoption:
+   *Amended 2026-08-24 (issue #1716).* **Resolved by withdrawing the
+   ambiguous sibling.** The `operator` value (shipped `driver-installer`)
+   and the deferred `operator-selfdriver` were the same cluster shape with
+   different installer owners — the only distinction a durable marker could
+   have expressed. Instead of marking it, the landing event removed
+   `driver-installer` and shipped the deferred value as `bundle-installer`:
+   the two remaining values (`gke-default`, `bundle-installer`) differ in
+   the pre-existing opt-out pool label (negated vs positive), a
+   generation-time signal, so **no post-deployment marker exists on GKE**
+   and this decision needs no signal identification.
 
-   - **Mechanism.** `ProfileValue` gains `readinessConstraints` — same
-     catalog-load validation as `constraints` with per-phase name
-     deduplication (the same measurement path may carry a generation
-     pre-condition and a readiness post-deployment state — this is
-     exactly the DD5 shape, since both signals here are
-     `NodeTopology.gpu-nodes.label` readings), routed into
-     `spec.validation.readiness.constraints` at resolution and **never
-     evaluated at generation time**. This is required for any
-     post-deployment signal: generation-time evaluation runs against a
-     pre-deployment snapshot in which the signal cannot yet exist, and
-     the overlay-level readiness block cannot vary per value. The
-     `aicr validate` readiness pre-flight evaluates them with the same
-     fail-closed exit as every other readiness gate.
-   - **Signal.** GCP-native labels cannot distinguish the two unmanaged
-     values: both require identical pool shapes
-     (`gpu-driver-version=disabled` + the opt-out label; Google's own
-     installer DaemonSet schedules only where
-     `cloud.google.com/gke-gpu-driver-version` is absent, so a
-     version-labeled pool is unreachable for either). The signal is
-     therefore AICR-owned: the `gcp-driver-installer` DaemonSet stamps
-     a durable node label after a successful install;
-     `operator-selfdriver` asserts it under `readinessConstraints` and
-     `operator` (shipped name `driver-installer`) asserts its absence —
-     both declarations land together with the value's adoption (the
-     sketch above shows the declared shape).
-     A further hardening — a generation-time
-     `!cloud.google.com/gke-gpu-driver-version` constraint on both
-     unmanaged values, converting the documented "opt-out label +
-     managed install = driverless pool" misconfiguration into a
-     fail-closed recipe error — is DEFERRED: a value may carry one
-     constraint per measurement path per phase, and
-     `NodeTopology.gpu-nodes.label` is already occupied at generation
-     by the pool-label constraint. It requires a conjunction grammar
-     for the label form, tracked as follow-up work.
+   The mechanism this decision originally motivated survives with a
+   different first consumer: `ProfileValue` gains `readinessConstraints` —
+   same catalog-load validation as `constraints` with per-phase name
+   deduplication, routed into `spec.validation.readiness.constraints` at
+   resolution and **never evaluated at generation time**. It exists for
+   families whose values are distinguishable only by deployment-created
+   state, where no sibling can be withdrawn because the values are
+   distinct cluster shapes. The OKE `gpuStack` family is that consumer:
+   its three values (image driver + OKE plugin / image driver + operator
+   plugin / operator-managed everything) are three real pool shapes, and
+   `operator-plugin` vs `operator-managed` has exactly the
+   destroyed-by-success structure this decision described — the
+   pre-condition (no driver loaded) is erased by the value working, so
+   the durable distinguisher is the deployed ClusterPolicy state
+   (`K8s.policy.driver.enabled`, `K8s.policy.devicePlugin.enabled`),
+   evaluated by the `aicr validate` readiness pre-flight with the same
+   fail-closed exit as every other readiness gate.
+
+   Deferred hardening (unchanged): a generation-time
+   `!cloud.google.com/gke-gpu-driver-version` constraint on
+   `bundle-installer`, converting the documented "opt-out label + managed
+   install = driverless pool" misconfiguration into a fail-closed recipe
+   error, requires a conjunction grammar for the label form — a value may
+   carry one constraint per measurement path per phase, and
+   `NodeTopology.gpu-nodes.label` is already occupied at generation by the
+   pool-label constraint.

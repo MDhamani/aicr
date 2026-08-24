@@ -13,12 +13,11 @@
 # limitations under the License.
 
 # gcp-driver-installer — Google's cos-gpu-installer DaemonSet as an
-# AICR-managed component (issue #1716, ADR-015 operator-selfdriver).
+# AICR-managed component (issue #1716, ADR-015 bundle-installer).
 #
 # Values-gated: the component sits unconditionally in the GKE COS chain and
 # renders NOTHING unless installer.enabled is true. The gpuStack profile owns
-# this gate — operator-selfdriver flips it on; gke-default and driver-installer
-# pin it off. Do not set it directly: it is a profile-owned (locked) path.
+# this gate — bundle-installer flips it on; gke-default pins it off. Do not set it directly: it is a profile-owned (locked) path.
 installer:
   enabled: false
 

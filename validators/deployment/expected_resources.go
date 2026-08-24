@@ -45,7 +45,7 @@ import (
 const (
 	nodewrightCustomizationsComponent = "nodewright-customizations"
 	// gcpDriverInstallerComponent is the values-gated GKE COS driver
-	// installer (issue #1716); rendered only under gpuStack=operator-selfdriver.
+	// installer (issue #1716); rendered only under gpuStack=bundle-installer.
 	gcpDriverInstallerComponent = "gcp-driver-installer"
 	draDriverComponent          = "nvidia-dra-driver-gpu"
 	networkOperatorComponent    = "network-operator"

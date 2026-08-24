@@ -49,9 +49,9 @@
 # live GB200 GKE validation).
 {{- $vals := index .Values "gcp-driver-installer" }}
 # Values-gated (ADR-015): renders nothing unless the gpuStack
-# operator-selfdriver profile value flips installer.enabled true.
-# Default-off fails closed: an ungated render would fight the
-# operator-applied DaemonSet of the driver-installer value.
+# bundle-installer profile value flips installer.enabled true.
+# Default-off fails closed: rendering the installer is a profile
+# decision, never a chart default.
 {{- if eq (toString (index (index $vals "installer") "enabled")) "true" }}
 ---
 apiVersion: apps/v1
@@ -154,15 +154,6 @@ spec:
         - bash
         - -c
         - |
-          # Durable ownership marker (ADR-015 DD5): an NFD local feature file
-          # the nfd worker turns into the node label
-          # feature.node.kubernetes.io/gcp-driver-installer=true. Written
-          # unconditionally (also on the fast path) so the label is restored
-          # after reboots, where COS resets /etc. The operator-selfdriver
-          # profile value asserts this label at validate time;
-          # driver-installer asserts its absence.
-          mkdir -p /root/etc/kubernetes/node-feature-discovery/features.d
-          echo "gcp-driver-installer=true"             > /root/etc/kubernetes/node-feature-discovery/features.d/gcp-driver-installer
           echo "Checking for existing GPU driver modules"
           if lsmod | grep nvidia; then
             echo "GPU driver is already installed, the installed version may or may not be the driver version being tried to install, skipping installation"

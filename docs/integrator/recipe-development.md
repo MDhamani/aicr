@@ -472,10 +472,10 @@ and a post-deployment state at readiness), but
 `readinessConstraints` are never evaluated at generation time — they route
 into `spec.validation.readiness.constraints` and are evaluated fail-closed by
 the `aicr validate` readiness pre-flight. Use this for properties the value's
-own workload creates (e.g. a node label its DaemonSet applies after a
-successful install — ADR-015 Deferred Decision 5), which by construction
-cannot be present in the pre-deployment snapshot that generation-time
-constraints are checked against.
+own deployment creates (e.g. the deployed ClusterPolicy's
+`K8s.policy.driver.enabled` state, which distinguishes the OKE gpuStack
+values), which by construction cannot be present in the pre-deployment
+snapshot that generation-time constraints are checked against.
 
 **Constraint names must be measurement paths a supported snapshot producer
 actually emits** — a collector, or a provider projection attached at the
@@ -562,7 +562,7 @@ directions fail closed on a truncated node list (a snapshot captured with
 reading), on an empty GPU-node universe, and on malformed or ambiguous
 label readings (an encoding collision between a disambiguated entry and a
 distinct dotted label name — see #2003). It is consumed by the GKE
-`gpuStack` profile values (the positive form qualifies `driver-installer`, the
+`gpuStack` profile values (the positive form qualifies `bundle-installer`, the
 negated form `gke-default`), where each selected value's constraint is
 verified at generation when generating from a snapshot (criteria-only
 generation has no snapshot evaluator and defers entirely to the

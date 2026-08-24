@@ -60,16 +60,9 @@ func TestGKEGpuStackProfileResolution(t *testing.T) {
 			wantConstraint: "!gke-no-default-nvidia-gpu-device-plugin",
 		},
 		{
-			name:           "explicit driver-installer records no advertiser and the positive label predicate",
-			selection:      "gpuStack=driver-installer",
-			wantValue:      "driver-installer",
-			wantAdvertiser: "",
-			wantConstraint: "gke-no-default-nvidia-gpu-device-plugin=true",
-		},
-		{
-			name:           "explicit operator-selfdriver records no advertiser and the positive label predicate",
-			selection:      "gpuStack=operator-selfdriver",
-			wantValue:      "operator-selfdriver",
+			name:           "explicit bundle-installer records no advertiser and the positive label predicate",
+			selection:      "gpuStack=bundle-installer",
+			wantValue:      "bundle-installer",
 			wantAdvertiser: "",
 			wantConstraint: "gke-no-default-nvidia-gpu-device-plugin=true",
 		},
@@ -105,34 +98,6 @@ func TestGKEGpuStackProfileResolution(t *testing.T) {
 			installerOwned := selected.OwnedPaths["gcp-driver-installer"]
 			if len(installerOwned) != 2 || installerOwned[0] != "enabled" || installerOwned[1] != "installer.enabled" {
 				t.Errorf("ownedPaths[gcp-driver-installer] = %v, want [enabled installer.enabled]", installerOwned)
-			}
-			// DD5 symmetry: the two unmanaged values carry the ownership
-			// marker as a readiness constraint — positive under
-			// operator-selfdriver, negated under driver-installer, absent
-			// under gke-default (the marker names installer ownership, which
-			// gke-default does not contest).
-			const markerLabel = "feature.node.kubernetes.io/gcp-driver-installer"
-			var readinessMarker string
-			if result.Validation != nil && result.Validation.Readiness != nil {
-				for _, c := range result.Validation.Readiness.Constraints {
-					if c.Name == "NodeTopology.gpu-nodes.label" {
-						readinessMarker = c.Value
-					}
-				}
-			}
-			switch tt.wantValue {
-			case "operator-selfdriver":
-				if readinessMarker != markerLabel+"=true" {
-					t.Errorf("readiness marker = %q, want %q", readinessMarker, markerLabel+"=true")
-				}
-			case "driver-installer":
-				if readinessMarker != "!"+markerLabel {
-					t.Errorf("readiness marker = %q, want %q", readinessMarker, "!"+markerLabel)
-				}
-			default:
-				if readinessMarker != "" {
-					t.Errorf("readiness marker = %q, want none under gke-default", readinessMarker)
-				}
 			}
 			var found bool
 			for _, c := range result.Constraints {
@@ -411,7 +376,7 @@ func TestCoherenceGateRejectsDriverInstallerIncoherentTuples(t *testing.T) {
 	t.Run("stock driver-installer tuple passes the gate", func(t *testing.T) {
 		t.Parallel()
 		result, err := NewBuilder().BuildFromCriteriaWithProfile(
-			t.Context(), gkeCriteria(), "gpuStack=driver-installer")
+			t.Context(), gkeCriteria(), "gpuStack=bundle-installer")
 		if err != nil {
 			t.Fatalf("BuildFromCriteriaWithProfile() failed: %v", err)
 		}
@@ -423,7 +388,7 @@ func TestCoherenceGateRejectsDriverInstallerIncoherentTuples(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			result, err := NewBuilder().BuildFromCriteriaWithProfile(
-				t.Context(), gkeCriteria(), "gpuStack=driver-installer")
+				t.Context(), gkeCriteria(), "gpuStack=bundle-installer")
 			if err != nil {
 				t.Fatalf("BuildFromCriteriaWithProfile() failed: %v", err)
 			}
