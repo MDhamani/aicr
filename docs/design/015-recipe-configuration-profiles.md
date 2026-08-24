@@ -247,18 +247,15 @@ spec:
         componentRefs:
           - name: gcp-driver-installer
             overrides:
-              install: false      # every value assigns every union path
+              # every value assigns every union path; nested gate — see the
+              # amendment on operator-selfdriver below.
+              installer: {enabled: false}
           - name: gpu-operator
             overrides:
               devicePlugin: {enabled: true}
         constraints:
           - name: NodeTopology.gpu-nodes.label   # requires #1755
             value: gke-no-default-nvidia-gpu-device-plugin=true
-        # Amended 2026-08-22: DD5 symmetry — this value asserts the
-        # ABSENCE of the installer's ownership marker at readiness.
-        readinessConstraints:
-          - name: NodeTopology.gpu-nodes.label
-            value: "!feature.node.kubernetes.io/gcp-driver-installer"
       # GKE-installed driver AND GKE's managed device plugin — a
       # default-provisioned GKE cluster (no node label required). The
       # declared default: the only value satisfied with zero setup.
@@ -267,7 +264,7 @@ spec:
         componentRefs:
           - name: gcp-driver-installer
             overrides:
-              install: false
+              installer: {enabled: false}
           - name: gpu-operator
             overrides:
               devicePlugin: {enabled: false}
@@ -296,13 +293,6 @@ spec:
         constraints:
           - name: NodeTopology.gpu-nodes.label
             value: gke-no-default-nvidia-gpu-device-plugin=true
-        # Amended 2026-08-22: the DD5 distinguishing signal — a property
-        # the value's own deployment creates, absent from any
-        # pre-deployment snapshot — is declared under readinessConstraints
-        # and evaluated by the validate pre-flight only.
-        readinessConstraints:
-          - name: NodeTopology.gpu-nodes.label
-            value: feature.node.kubernetes.io/gcp-driver-installer=true
 ```
 
 The GKE declaration lives once in `gke-cos`; accelerator/intent leaves
@@ -530,7 +520,7 @@ to the surviving composition:
                                 # digest, so ordering must be byte-stable
         # Post-DD5 state shown; the initial recording is
         # gpu-operator: [devicePlugin.enabled, enabled] only.
-        gcp-driver-installer: [enabled, install]
+        gcp-driver-installer: [enabled, installer.enabled]
         gpu-operator: [devicePlugin.enabled, enabled]
   ```
 
@@ -1542,40 +1532,37 @@ work that resolves it.
    **Proposed: identify a durable signal during the value's adoption;
    the `operator` and `csp-managed` values do not wait on it.**
 
-   *Amended 2026-08-22 (issue #1716).* Two parts land with the value's
-   adoption:
+   *Amended 2026-08-24: mechanism only.* `ProfileValue` gains
+   `readinessConstraints` — same catalog-load validation as `constraints`
+   with per-phase name deduplication (the same measurement path may carry
+   a generation-time pre-condition and a readiness-time post-deployment
+   state), routed into `spec.validation.readiness.constraints` at
+   resolution and **never evaluated at generation time**. The
+   `aicr validate` readiness pre-flight evaluates them with the same
+   fail-closed exit as every other readiness gate.
 
-   - **Mechanism.** `ProfileValue` gains `readinessConstraints` — same
-     catalog-load validation as `constraints` with per-phase name
-     deduplication (the same measurement path may carry a generation
-     pre-condition and a readiness post-deployment state — this is
-     exactly the DD5 shape, since both signals here are
-     `NodeTopology.gpu-nodes.label` readings), routed into
-     `spec.validation.readiness.constraints` at resolution and **never
-     evaluated at generation time**. This is required for any
-     post-deployment signal: generation-time evaluation runs against a
-     pre-deployment snapshot in which the signal cannot yet exist, and
-     the overlay-level readiness block cannot vary per value. The
-     `aicr validate` readiness pre-flight evaluates them with the same
-     fail-closed exit as every other readiness gate.
-   - **Signal.** GCP-native labels cannot distinguish the two unmanaged
-     values: both require identical pool shapes
-     (`gpu-driver-version=disabled` + the opt-out label; Google's own
-     installer DaemonSet schedules only where
-     `cloud.google.com/gke-gpu-driver-version` is absent, so a
-     version-labeled pool is unreachable for either). The signal is
-     therefore AICR-owned: the `gcp-driver-installer` DaemonSet stamps
-     a durable node label after a successful install;
-     `operator-selfdriver` asserts it under `readinessConstraints` and
-     `operator` (shipped name `driver-installer`) asserts its absence —
-     both declarations land together with the value's adoption (the
-     sketch above shows the declared shape).
-     A further hardening — a generation-time
-     `!cloud.google.com/gke-gpu-driver-version` constraint on both
-     unmanaged values, converting the documented "opt-out label +
-     managed install = driverless pool" misconfiguration into a
-     fail-closed recipe error — is DEFERRED: a value may carry one
-     constraint per measurement path per phase, and
-     `NodeTopology.gpu-nodes.label` is already occupied at generation
-     by the pool-label constraint. It requires a conjunction grammar
-     for the label form, tracked as follow-up work.
+   The mechanism exists for values whose distinguishers are
+   deployment-created — where no generation-time reading can hold. Two
+   rules govern its use:
+
+   - **The self-falsifying pre-condition trap.** Generation-time
+     constraints are re-evaluated by the validate pre-flight, so a
+     pre-condition that the value's own success erases (e.g. "no NVIDIA
+     driver loaded" on a value whose operator installs the driver) must
+     never be declared as a generation constraint — it fails every
+     post-deployment validate on a correctly working cluster. Such state
+     belongs in `readinessConstraints`, asserted in its post-deployment
+     form.
+   - **Self-rendered readings do not qualify.** A reading the selected
+     bundle itself renders (e.g. deployed ClusterPolicy fields) is
+     satisfied by construction under every value — it is a useful
+     rendered-policy **drift check**, but it cannot serve as a value's
+     distinguishing constraint. Qualification requires cluster state
+     independent of the bundle's own output (provider properties, node
+     labels set at provisioning, externally-owned objects).
+
+   This PR resolves no GKE signal: the GKE family's DD5 question was
+   settled separately by value replacement (see the adoption-step
+   amendment), and its shipped values are generation-time
+   distinguishable. The mechanism's consumers are families whose values
+   are distinct cluster shapes with deployment-created distinguishers.
