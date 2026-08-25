@@ -1726,12 +1726,17 @@ func resolveHelmComponentValues(
 // on a Client whose recipe source is unrelated to the target cluster.
 //
 // cfg.Kubeconfig is the path (or empty for in-cluster). cfg.Namespace and
-// cfg.Image must be set. cfg.JobName and cfg.ServiceAccountName are
-// optional naming prefixes, not required names — leaving them empty is
-// fine: cfg.NameBase (default "aicr") supplies the prefix instead, and
-// cfg.RunID is appended to whichever prefix applies, so every object this
-// call deploys is named uniquely to this run either way. Other fields fall
-// back to package defaults documented on snapshotter.AgentConfig.
+// cfg.Image must be set. cfg.JobName is an optional naming prefix, not a
+// required name — leaving it empty is fine: cfg.NameBase (default "aicr")
+// supplies the prefix instead, and cfg.RunID is appended to whichever
+// prefix applies, so the Job this call deploys is named uniquely to this
+// run either way.
+//
+// cfg.ServiceAccountName is exact-if-exists: it names an existing
+// ServiceAccount when one of exactly that name is already in cfg.Namespace
+// — in which case this call creates and deletes no RBAC at all — and is a
+// prefix otherwise. See its own documentation on AgentConfig. Other fields
+// fall back to package defaults documented on snapshotter.AgentConfig.
 //
 // # Output and delivery
 //
