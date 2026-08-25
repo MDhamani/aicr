@@ -1,0 +1,99 @@
+---
+# Proves the DGXC Go proxy path works before any production job depends on it.
+#
+# Step 2 of #2372. Deliberately `workflow_dispatch` only: it wires nothing into
+# the merge gate, so a broken OIDC exchange or a misconfigured resolver cannot
+# block anyone's PR. Delete this file to revert.
+#
+# Run it from the `main` ref. A `workflow_dispatch` on main presents the same
+# OIDC subject as a push to main (`repo:NVIDIA/aicr:ref:refs/heads/main`), which
+# is what makes this representative — a pull_request run presents
+# `refs/pull/N/merge` instead and cannot validate the identity mapping the
+# exchange actually matches on.
+#
+# What a green run proves: the OIDC exchange mints a token, GOPROXY is ordered
+# with Artifactory first, GOSUMDB verification is intact, and a real module graph
+# resolves. What it does NOT prove: coverage. Under `routed` the resolver falls
+# through to `direct` on 404/410, so a module Artifactory does not carry is
+# fetched from the public internet and the build still goes green. Only
+# `enforced` closes that, and only once the graph is known to be served.
+name: DGXC Go Proxy Probe
+
+on:
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+env:
+  # Rule 5 of the adoption kit: under `auto`, a repo whose `go` directive
+  # exceeds the installed toolchain downloads one through GOPROXY as
+  # golang.org/toolchain. Pinning removes a thing that changes without a commit.
+  GOTOOLCHAIN: local
+
+jobs:
+  probe:
+    name: Probe
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      # Required. This is what lets the runner request an OIDC token; without
+      # it the exchange has nothing to present and the action cannot mint one.
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@7a3fe6cf4cb3a834922a1244abfce67bcef6a0c5  # v6.2.0
+        with:
+          go-version-file: go.mod
+
+      # No tooling is installed in this job, so rule 4 ("install tooling before
+      # configuring the proxy") is satisfied trivially. That is not true of
+      # go-test, which is why wiring it is a separate, later step.
+      - name: Configure the DGXC Go proxy
+        uses: ./.github/actions/setup-dgxc-goproxy
+        with:
+          mode: routed
+
+      # Non-optional. GOPROXY is an ordered list and Go consults later entries
+      # only on 404/410, so `proxy.golang.org,<artifactory>,direct` looks routed,
+      # reports a healthy posture, and routes zero modules through Artifactory.
+      # If the action ever no-ops, everything downstream still passes. Only an
+      # assertion that fails the build catches it (upstream F-024).
+      - name: Assert the proxy is actually in front
+        shell: bash
+        run: |
+          proxy="$(go env GOPROXY)"
+          echo "GOPROXY=${proxy}"
+          case "${proxy}" in
+            *"|"*) echo "GOPROXY uses '|', which falls through on 401/403. Use ','."; exit 1 ;;
+          esac
+          case "${proxy%%,*}" in
+            https://edge.urm.nvidia.com/*) ;;
+            *) echo "first GOPROXY entry is '${proxy%%,*}', not Artifactory"; exit 1 ;;
+          esac
+          [ "$(go env GOSUMDB)" != off ] || { echo "GOSUMDB=off"; exit 1; }
+          echo "OK: Artifactory is first in GOPROXY and GOSUMDB is intact"
+
+      # The real work. `go mod download` resolves the module graph from
+      # go.mod/go.sum rather than reading vendor/, so it is a genuine
+      # application-dependency fetch even though this repo vendors.
+      - name: Resolve the module graph through the proxy
+        shell: bash
+        run: go mod download all
+
+      # Required, not tidy. The action writes a GOAUTH credential to
+      # $RUNNER_TEMP that must outlive it, and composite actions get no
+      # teardown hook — so until this runs, every later step in the job can
+      # read a valid Artifactory credential. Bounded here by the 15-minute
+      # token lifetime and per-job RUNNER_TEMP on GitHub-hosted runners;
+      # neither bound holds on self-hosted (upstream F-028).
+      - name: Remove the proxy credential
+        if: always()
+        shell: bash
+        run: rm -f "${RUNNER_TEMP}/dgxc-goauth"
