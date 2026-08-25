@@ -389,9 +389,15 @@ func TestIsRetryableWatchError(t *testing.T) {
 			want:  true,
 		},
 		{
-			name:  "410 Gone is retryable",
-			event: errorEvent(statusOf(apierrors.NewGone("gone"))),
-			want:  true,
+			// Built from a raw Status rather than the deprecated NewGone: a
+			// bare 410 with no expiry semantics is what an LB-terminated
+			// watch returns.
+			name: "410 Gone is retryable",
+			event: errorEvent(&metav1.Status{
+				Status: metav1.StatusFailure,
+				Reason: metav1.StatusReasonGone,
+			}),
+			want: true,
 		},
 		{
 			name:  "503 ServiceUnavailable is retryable",

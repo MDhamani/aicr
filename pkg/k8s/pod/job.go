@@ -76,17 +76,25 @@ func isRetryableWatchError(event watch.Event) bool {
 		return false
 	}
 	err := apierrors.FromObject(event.Object)
-	if err == nil {
-		return false
-	}
-	if apierrors.IsResourceExpired(err) || apierrors.IsGone(err) ||
-		apierrors.IsTimeout(err) || apierrors.IsServerTimeout(err) ||
-		apierrors.IsTooManyRequests(err) || apierrors.IsServiceUnavailable(err) {
+	if isTransientAPIStatus(err) {
 		return true
 	}
+	// The StreamWatcher wraps transport failures in a generic InternalError, so
+	// the Reason carries no signal and the message is the only discriminator.
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "http2: client connection lost") ||
 		strings.Contains(msg, "unable to decode an event from the watch stream")
+}
+
+// isTransientAPIStatus reports whether an apiserver Status error is one the
+// client is expected to retry rather than a terminal rejection.
+func isTransientAPIStatus(err error) bool {
+	return apierrors.IsResourceExpired(err) ||
+		apierrors.IsGone(err) ||
+		apierrors.IsTimeout(err) ||
+		apierrors.IsServerTimeout(err) ||
+		apierrors.IsTooManyRequests(err) ||
+		apierrors.IsServiceUnavailable(err)
 }
 
 // resumeJobWatch reconnects a Job watch that ended — the channel closed or the
