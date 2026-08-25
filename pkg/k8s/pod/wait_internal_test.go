@@ -362,3 +362,70 @@ func TestWatchClosedContext(t *testing.T) {
 		}
 	})
 }
+
+func TestIsRetryableWatchError(t *testing.T) {
+	t.Parallel()
+
+	errorEvent := func(obj runtime.Object) watch.Event {
+		return watch.Event{Type: watch.Error, Object: obj}
+	}
+	statusOf := func(err error) runtime.Object {
+		var statusErr *apierrors.StatusError
+		if !stderrors.As(err, &statusErr) {
+			t.Fatalf("expected *apierrors.StatusError, got %T", err)
+		}
+		return &statusErr.ErrStatus
+	}
+
+	tests := []struct {
+		name  string
+		event watch.Event
+		want  bool
+	}{
+		{name: "added event is not retryable", event: watch.Event{Type: watch.Added}, want: false},
+		{
+			name:  "410 ResourceExpired is retryable",
+			event: errorEvent(statusOf(apierrors.NewResourceExpired("compacted"))),
+			want:  true,
+		},
+		{
+			name:  "410 Gone is retryable",
+			event: errorEvent(statusOf(apierrors.NewGone("gone"))),
+			want:  true,
+		},
+		{
+			name:  "503 ServiceUnavailable is retryable",
+			event: errorEvent(statusOf(apierrors.NewServiceUnavailable("apiserver down"))),
+			want:  true,
+		},
+		{
+			name:  "timeout is retryable",
+			event: errorEvent(statusOf(apierrors.NewTimeoutError("timed out", 1))),
+			want:  true,
+		},
+		{
+			name: "http2 client connection lost is retryable",
+			event: errorEvent(statusOf(apierrors.NewInternalError(
+				stderrors.New("unable to decode an event from the watch stream: http2: client connection lost")))),
+			want: true,
+		},
+		{
+			name:  "generic InternalError stays fatal",
+			event: errorEvent(statusOf(apierrors.NewInternalError(stderrors.New("boom")))),
+			want:  false,
+		},
+		{
+			name:  "Forbidden stays fatal",
+			event: errorEvent(statusOf(apierrors.NewForbidden(batchv1.Resource("jobs"), "j", stderrors.New("denied")))),
+			want:  false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := isRetryableWatchError(tt.event); got != tt.want {
+				t.Errorf("isRetryableWatchError() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}

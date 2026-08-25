@@ -456,6 +456,49 @@ func TestWaitForJobCompletion_RetryableWatchErrorResumes(t *testing.T) {
 	}
 }
 
+// TestWaitForJobCompletion_HTTP2DropWatchErrorResumes is the UAT flake from
+// run 32765635777: client-go StreamWatcher emits InternalError
+// "unable to decode an event from the watch stream: http2: client connection
+// lost" when GKE's apiserver LB drops the watch. That is a dead stream, not
+// a failed Job — resume and keep waiting.
+func TestWaitForJobCompletion_HTTP2DropWatchErrorResumes(t *testing.T) {
+	t.Parallel()
+
+	client := fake.NewSimpleClientset(&batchv1.Job{ //nolint:staticcheck
+		ObjectMeta: metav1.ObjectMeta{Name: "j", Namespace: "default", ResourceVersion: "1"},
+	})
+
+	var watches atomic.Int32
+	first := watch.NewFake()
+	second := watch.NewFake()
+	client.PrependWatchReactor("jobs", func(_ k8stesting.Action) (bool, watch.Interface, error) {
+		switch watches.Add(1) {
+		case 1:
+			return true, first, nil
+		case 2:
+			return true, second, nil
+		default:
+			return true, watch.NewFake(), nil
+		}
+	})
+
+	go func() {
+		time.Sleep(10 * time.Millisecond)
+		lost := apierrors.NewInternalError(stderrors.New(
+			"unable to decode an event from the watch stream: http2: client connection lost"))
+		first.Error(&lost.ErrStatus)
+		time.Sleep(30 * time.Millisecond)
+		second.Modify(terminalJobRV("2", batchv1.JobComplete))
+	}()
+
+	if err := pod.WaitForJobCompletion(context.Background(), client, "default", "j", 2*time.Second); err != nil {
+		t.Fatalf("expected nil after http2-drop watch error resume, got: %v", err)
+	}
+	if got := watches.Load(); got < 2 {
+		t.Errorf("expected at least 2 watch attempts (resume after http2 drop), got %d", got)
+	}
+}
+
 // TestWaitForJobCompletion_FatalWatchErrorReturns confirms a non-retryable
 // watch.Error still aborts the wait with ErrCodeInternal rather than resuming.
 func TestWaitForJobCompletion_FatalWatchErrorReturns(t *testing.T) {

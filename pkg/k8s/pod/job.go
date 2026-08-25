@@ -17,6 +17,7 @@ package pod
 import (
 	"context"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/NVIDIA/aicr/pkg/defaults"
@@ -49,24 +50,48 @@ func resumeContext(namespace, name string) map[string]any {
 }
 
 // isRetryableWatchError reports whether a watch.Error event is a routine,
-// resumable signal (HTTP 410 Gone / ResourceExpired — the apiserver compacted
-// past the watch's ResourceVersion) rather than a fatal stream error. Callers
-// treat a retryable error like a channel close and re-establish the watch;
-// anything else aborts the wait.
+// resumable signal rather than a fatal stream error. Callers treat a retryable
+// error like a channel close and re-establish the watch; anything else aborts
+// the wait.
 //
-// Against a real apiserver this is the *common* shape of a stale-ResourceVersion
-// rejection: the Watch call itself succeeds and the 410 arrives as the stream's
-// first ERROR event, not as a synchronous call error.
+// Retryable shapes:
+//   - HTTP 410 Gone / ResourceExpired — the apiserver compacted past the
+//     watch's ResourceVersion. Against a real apiserver this is the *common*
+//     shape of a stale-RV rejection: the Watch call itself succeeds and the
+//     410 arrives as the stream's first ERROR event, not as a synchronous
+//     call error.
+//   - Timeout / server-timeout / 429 / 503 — the apiserver or an LB asked
+//     the client to retry; the Job did not fail.
+//   - client-go StreamWatcher decode failures, including
+//     "http2: client connection lost". GKE (and any HTTP/2 kube-apiserver
+//     fronted by a load balancer) drops idle watch streams this way. The
+//     ERROR event is the same class as a channel close: the stream died;
+//     the Job did not. UAT run 32765635777 failed inference-perf on this
+//     exact Status while the AIPerf Job was still running.
+//
+// Generic InternalError (RBAC bugs, etcd faults, "boom") stays fatal so a
+// real defect is not retried until the deadline.
 func isRetryableWatchError(event watch.Event) bool {
 	if event.Type != watch.Error {
 		return false
 	}
 	err := apierrors.FromObject(event.Object)
-	return apierrors.IsResourceExpired(err) || apierrors.IsGone(err)
+	if err == nil {
+		return false
+	}
+	if apierrors.IsResourceExpired(err) || apierrors.IsGone(err) ||
+		apierrors.IsTimeout(err) || apierrors.IsServerTimeout(err) ||
+		apierrors.IsTooManyRequests(err) || apierrors.IsServiceUnavailable(err) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "http2: client connection lost") ||
+		strings.Contains(msg, "unable to decode an event from the watch stream")
 }
 
 // resumeJobWatch reconnects a Job watch that ended — the channel closed or the
-// apiserver emitted a retryable 410 — before the Job reached a terminal state.
+// apiserver emitted a retryable watch.Error (410, HTTP/2 drop) — before the
+// Job reached a terminal state.
 //
 // It resyncs via a field-selected List rather than a Get, which is load-bearing:
 //   - The List's collection ResourceVersion (metadata.resourceVersion) is the
