@@ -98,6 +98,39 @@ jobs:
         shell: bash
         run: go mod download
 
+      # The action exports GOFLAGS=-mod=readonly to GITHUB_ENV, which is
+      # job-wide and cannot be scoped to one step. This repo commits vendor/,
+      # so Go would otherwise default to -mod=vendor; -mod=readonly overrides
+      # that and resolves from the module cache instead. Measured locally:
+      # `go list k8s.io/api/core/v1` returns vendor/... by default and
+      # ~/go/pkg/mod/... under -mod=readonly.
+      #
+      # These assertions establish what that actually costs before go-test is
+      # wired, rather than discovering it in the merge gate.
+      - name: Record the resolver posture the action leaves behind
+        shell: bash
+        run: |
+          echo "ambient GOFLAGS=$(go env GOFLAGS)"
+          echo "ambient GOPROXY=$(go env GOPROXY)"
+          amb="$(go list -f '{{.Dir}}' k8s.io/api/core/v1)"
+          vnd="$(GOFLAGS=-mod=vendor go list -f '{{.Dir}}' k8s.io/api/core/v1)"
+          echo "ambient resolves to: ${amb}"
+          echo "inline -mod=vendor resolves to: ${vnd}"
+          case "${vnd}" in
+            */vendor/*) echo "OK: an inline GOFLAGS=-mod=vendor still wins, so 'make test' is unaffected" ;;
+            *) echo "::error::inline -mod=vendor did NOT resolve from vendor/; make test would change behavior"; exit 1 ;;
+          esac
+
+      # go-test's real application fetch. Reproduced here so its cost and
+      # correctness are known before it runs inside the merge gate.
+      - name: Reproduce the go-test vendor sync check
+        shell: bash
+        run: |
+          go mod vendor
+          git diff --exit-code vendor/ \
+            || { echo "::error::vendor/ changed when regenerated through the proxy"; exit 1; }
+          echo "OK: vendor/ regenerated through the proxy is byte-identical to what is committed"
+
       # Required, not tidy. The action writes a GOAUTH credential to
       # $RUNNER_TEMP that must outlive it, and composite actions get no
       # teardown hook — so until this runs, every later step in the job can
