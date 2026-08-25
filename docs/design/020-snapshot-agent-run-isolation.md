@@ -214,6 +214,35 @@ selectors whose value now changes per run.
   its `podSelector` from `job-name: aicr` to `app.kubernetes.io/name: aicr` +
   `app.kubernetes.io/component: snapshot-agent`, shipped with this change.
 
+### 9. Running as an existing ServiceAccount
+
+`--service-account-name` is **exact-if-exists**: when a ServiceAccount of exactly
+that name already exists in the namespace it is used verbatim; otherwise the value
+is a prefix and the run creates `<prefix>-<runID>` as decision 2 describes.
+
+In the exact case aicr **manages no permissions for that run** — no ServiceAccount,
+Role, RoleBinding, ClusterRole or ClusterRoleBinding is created, bound or deleted.
+Permissions are granted once, out of band, by `--add-roles-to-service-account
+<name>`: a separate provision-and-exit invocation that creates generic,
+non-run-scoped RBAC bound to that ServiceAccount. What it creates is permanent —
+run cleanup never touches it, and teardown is the operator's job. Combined with
+`--discover-network` it also provisions the mutating discovery rules.
+
+**Why this exists.** IRSA and GKE Workload Identity both pin trust to the
+ServiceAccount *name*: IRSA's trust policy conditions on
+`system:serviceaccount:<ns>:<name>`, and GKE's IAM binding names the KSA as
+`PROJECT.svc.id.goog[<ns>/<name>]` and accepts no wildcard. A per-run name cannot
+be trusted by either, and copying the annotations onto a run-scoped ServiceAccount
+does not help, because it is the name the provider refuses. Without this mode,
+upgrading silently strips those identities' cloud credentials.
+
+**What it costs.** This is the one mode that waives per-run permission isolation:
+concurrent runs sharing an external ServiceAccount share its grants, and a
+`--discover-network`-provisioned ServiceAccount carries mutating cluster
+permissions permanently rather than for one run's lifetime. That is the trade the
+mode exists to make, it is opt-in, and it is documented in
+`docs/user/agent-deployment.md` so an operator meets it before choosing it.
+
 ## Non-Goals
 
 - No change to the user-facing `cm://namespace/name` output contract.
@@ -222,6 +251,8 @@ selectors whose value now changes per run.
 - No automated sweep of cluster-scoped RBAC orphaned by a hard kill.
 - No modification to `pkg/validator`'s run isolation; this ADR consumes its
   primitives after they move to neutral packages.
+- No automatic teardown of the RBAC `--add-roles-to-service-account` provisions;
+  it is deliberately permanent (decision 9).
 
 ## Consequences
 
@@ -248,12 +279,11 @@ selectors whose value now changes per run.
   from the current docs silently stops fencing the agent. This is the sharpest
   edge in the change and needs a release-note callout.
 - A prefix is capped at 30 characters before truncation.
-- **Undocumented reliance on ServiceAccount adoption breaks silently.** A caller
-  passing `--service-account-name` for an out-of-band ServiceAccount gets
-  adoption today via `IgnoreAlreadyExists`; afterwards they get a fresh run-owned
-  ServiceAccount without their annotations. Mitigation: one `Get` at deploy and a
-  `slog.Warn` naming the generated ServiceAccount when a bare prefix-named one
-  already exists.
+- **Pointing at a pre-created ServiceAccount changes meaning.** A caller passing
+  `--service-account-name` for an out-of-band ServiceAccount got adoption via
+  `IgnoreAlreadyExists`. See decision 9: the flag is now *exact-if-exists*, so
+  that workflow is supported again — but deliberately, rather than as a side
+  effect of a create call that tolerated `AlreadyExists`.
 - Two extra cluster-scoped objects are created and deleted per run.
 - A hard kill still orphans a ClusterRole and ClusterRoleBinding, since
   cluster-scoped objects cannot have a namespaced owner.
