@@ -80,12 +80,23 @@ jobs:
           [ "$(go env GOSUMDB)" != off ] || { echo "GOSUMDB=off"; exit 1; }
           echo "OK: Artifactory is first in GOPROXY and GOSUMDB is intact"
 
-      # The real work. `go mod download` resolves the module graph from
-      # go.mod/go.sum rather than reading vendor/, so it is a genuine
-      # application-dependency fetch even though this repo vendors.
+      # The real work. `go mod download` resolves from go.mod/go.sum rather
+      # than reading vendor/, so it is a genuine application-dependency fetch
+      # even though this repo vendors.
+      #
+      # Deliberately NOT `go mod download all`. `all` walks the full transitive
+      # closure including test dependencies of dependencies, which reaches the
+      # Kubernetes staging modules. k8s.io/kubernetes declares those at v0.0.0
+      # and replaces them with local paths in its own go.mod, and Go ignores a
+      # dependency's replace directives — so `all` resolves k8s.io/metrics@v0.0.0,
+      # which returns 404 from every proxy (its real versions start at v0.19).
+      # That fails identically against proxy.golang.org and says nothing about
+      # Artifactory. None of those modules appear in vendor/modules.txt, so the
+      # build-scoped form below never reaches them and matches what CI actually
+      # needs.
       - name: Resolve the module graph through the proxy
         shell: bash
-        run: go mod download all
+        run: go mod download
 
       # Required, not tidy. The action writes a GOAUTH credential to
       # $RUNNER_TEMP that must outlive it, and composite actions get no
