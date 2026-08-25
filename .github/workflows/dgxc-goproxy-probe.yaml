@@ -20,6 +20,28 @@
 name: DGXC Go Proxy Probe
 
 on:
+  # Releases are cut from main and build entirely from committed vendor/
+  # (`.goreleaser.yaml` pins GOFLAGS=-mod=vendor on both binaries and sets
+  # `gomod: proxy: false`), so a release build never contacts a proxy and
+  # there is no fetch there to route. What can be established instead is that
+  # the vendored bytes a release ships are *reproducible from Artifactory* —
+  # which is what the vendor-equivalence step below asserts.
+  #
+  # Runs on main only. A push to main is always trusted, so `id-token: write`
+  # is available and no fork ever reaches this workflow. The merge gate is
+  # deliberately untouched: PR CI stays best-effort and frictionless.
+  push:
+    branches:
+      - main
+    paths:
+      # The inputs that decide what gets vendored...
+      - 'go.mod'
+      - 'go.sum'
+      - 'vendor/**'
+      # ...and everything the check is made of, so a change to the gate
+      # cannot skip its own verification.
+      - '.github/workflows/dgxc-goproxy-probe.yaml'
+      - '.github/actions/setup-dgxc-goproxy/**'
   workflow_dispatch: {}
 
 permissions:
