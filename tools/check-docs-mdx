@@ -38,8 +38,8 @@
 # spaces, and closes only on an explicit later line whose leading run is the
 # SAME character, at least as long, and followed by nothing but whitespace.
 # Thus ```yaml starts a fence when outside one and is content, not a closer,
-# when inside one. For an immediate direct top-level bullet or 1. item whose
-# content indent is at most three, a nonblank outdent implicitly ends its fence.
+# when inside one. For direct top-level bullet lists and ordered lists starting
+# at 1, a nonblank outdent implicitly ends a fence with content indent <= 3.
 # Inline code spans are stripped before scanning; a span opens on a run of N
 # backticks and closes at the next run of exactly N backticks.
 #
@@ -56,11 +56,19 @@
 # unclosed fragment ('<>'), a placeholder sharing a line with well-formed JSX,
 # unbalanced expression braces spanning lines, and acorn-level syntax errors.
 #
-# Known code-handling limits: later list items, lazy continuations, nested lists,
-# and mixed containers are parser-owned. Code spans are matched within one line;
-# the parser handles multi-line spans.
+# Known code-handling limits: ordered lists starting above 1, multi-digit and
+# tab-separated markers, lazy continuations, nested lists, and mixed containers
+# are parser-owned. Code spans are matched within one line; the parser handles
+# multi-line spans.
 
 set -euo pipefail
+
+# Fence tracking requires POSIX interval expressions. Fail closed when the
+# installed awk treats braces literally.
+if ! awk 'BEGIN { exit ("aaa" ~ /^a{3}$/ ? 0 : 1) }'; then
+  echo "ERROR: awk must support POSIX interval expressions" >&2
+  exit 1
+fi
 
 ERRORS=0
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -139,8 +147,8 @@ readonly FENCE_AWK='
       #           fence (ambiguous with an inline code span); tildes are exempt
       #   close:  same char, at least as long, nothing after but whitespace;
       #           the optional \r admits a CRLF closer
-      #   scope:  an immediate direct top-level bullet or 1. item may own an
-      #           indented fence; any nonblank outdent ends that scope
+      #   scope:  a direct top-level bullet list or ordered list starting at 1
+      #           may own an indented fence; any nonblank outdent ends that scope
       {
         blank = ($0 ~ /^[ \t]*\r?$/)
         ind = indent_width($0)
@@ -153,7 +161,7 @@ readonly FENCE_AWK='
 
         # Re-process a direct list boundary as prose or as a new outer fence.
         if (in_fence && fscope > 0 && !blank && ind < fscope) {
-          in_fence = 0; fscope = 0; list_indent = 0
+          in_fence = 0; fscope = 0
         }
 
         if (in_fence) {
@@ -161,14 +169,17 @@ readonly FENCE_AWK='
           next
         }
 
-        # Deliberately narrow list recognition: direct top-level bullets and
-        # ordered items starting at 1, with a normal content indent <= 3.
+        # Keep container tracking limited to direct top-level bullets and
+        # ordered lists starting at 1, with content indent <= 3. Recognize a
+        # one-digit later item only while that ordered-list scope remains active.
         # Exclude thematic breaks, which otherwise resemble bullet items.
         marker = !($0 ~ /^(-[ \t]*){3,}\r?$/ || $0 ~ /^(\*[ \t]*){3,}\r?$/) && match($0, /^([-+*]|1[.)]) +/)
-        if (marker && RLENGTH <= 3 && substr($0, RLENGTH + 1, 1) ~ /[^ \t\r]/) {
+        later_marker = !marker && ordered_list && match($0, /^[2-9][.)] +/)
+        if ((marker || later_marker) && RLENGTH <= 3 && substr($0, RLENGTH + 1, 1) ~ /[^ \t\r]/) {
           list_indent = RLENGTH
+          ordered_list = (substr($0, 1, 1) ~ /[1-9]/)
         } else if (!blank && list_indent > 0 && ind < list_indent) {
-          list_indent = 0
+          list_indent = 0; ordered_list = 0
         }
 
         if (is_fence && (ch != "`" || index(rest, "`") == 0)) {
@@ -184,13 +195,19 @@ readonly FENCE_AWK='
 VOID_ELEMENTS='img|br|hr|input|source|meta|link|area|base|col|embed|param|track|wbr'
 for file in "${FILES[@]}"; do
     FM_END="$(frontmatter_end "${file}")"
+    FENCE_STRIPPED=""
+    if ! FENCE_STRIPPED="$(awk -v fm_end="${FM_END}" "${FENCE_AWK}"'
+      { print NR": "$0 }
+    ' "${file}")"; then
+      echo "ERROR: awk failed while scanning fences for check 1: ${file}" >&2
+      ERRORS=$((ERRORS + 1))
+      continue
+    fi
     while IFS= read -r match; do
       [[ -z "${match}" ]] && continue
       echo "MDX: non-self-closing void element: ${file}:${match}"
       ERRORS=$((ERRORS + 1))
-    done < <(awk -v fm_end="${FM_END}" "${FENCE_AWK}"'
-      { print NR": "$0 }
-    ' "$file" | grep -E "<(${VOID_ELEMENTS})([[:space:]][^>]*)?" | grep -Ev "<(${VOID_ELEMENTS})([[:space:]][^>]*)?[[:space:]]*/>" || true)
+    done < <(printf '%s\n' "${FENCE_STRIPPED}" | grep -E "<(${VOID_ELEMENTS})([[:space:]][^>]*)?" | grep -Ev "<(${VOID_ELEMENTS})([[:space:]][^>]*)?[[:space:]]*/>" || true)
 done
 
 # --- Checks 2, 3, 4, 5, 6: bare braces, HTML comments, autolinks, bare tags,

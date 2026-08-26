@@ -68,6 +68,40 @@ else
     fail "script-parses" "bash -n reported a syntax error (an apostrophe inside the awk block?)"
 fi
 
+# --- Fixture 0b: unsupported or failing awk implementations fail closed. ---
+DIR_AWK_PRE="${TMPDIR_TEST}/awk-preflight"
+mkdir -p "${DIR_AWK_PRE}/bin" "${DIR_AWK_PRE}/docs"
+cat >"${DIR_AWK_PRE}/bin/awk" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+cat >"${DIR_AWK_PRE}/docs/doc.md" <<'MD'
+# Safe document
+MD
+chmod +x "${DIR_AWK_PRE}/bin/awk"
+OUT="$(PATH="${DIR_AWK_PRE}/bin:${PATH}" "${CHECK}" "${DIR_AWK_PRE}/docs" 2>&1)"
+RC=$?
+check_rc_nonzero "awk-preflight-exits-nonzero"
+check_contains   "awk-preflight-is-diagnostic" "awk must support POSIX interval expressions"
+
+DIR_AWK_FAIL="${TMPDIR_TEST}/awk-check1-failure"
+mkdir -p "${DIR_AWK_FAIL}/bin" "${DIR_AWK_FAIL}/docs"
+cat >"${DIR_AWK_FAIL}/bin/awk" <<'SH'
+#!/usr/bin/env bash
+if [[ "${1:-}" == 'BEGIN { exit ("aaa" ~ /^a{3}$/ ? 0 : 1) }' ]]; then
+  exit 0
+fi
+exit 42
+SH
+cat >"${DIR_AWK_FAIL}/docs/doc.md" <<'MD'
+# Safe document
+MD
+chmod +x "${DIR_AWK_FAIL}/bin/awk"
+OUT="$(PATH="${DIR_AWK_FAIL}/bin:${PATH}" "${CHECK}" "${DIR_AWK_FAIL}/docs" 2>&1)"
+RC=$?
+check_rc_nonzero "check1-awk-failure-exits-nonzero"
+check_contains   "check1-awk-failure-is-diagnostic" "awk failed while scanning fences for check 1"
+
 # --- Fixture 1: the #2050 regression — a bare '<= ' outside any code span. ---
 # The checker MUST fail closed here. If check 6 is removed, this token is not
 # a void element (check 1), autolink (check 4), or <name-start> tag (check 5),
@@ -276,6 +310,59 @@ run "${DIR_LEN}"
 check_rc_zero  "fence-length-exits-zero"
 check_absent   "fence-length-no-violation" "bare < not starting a valid tag"
 
+# --- Fixture 5a: closer length is at least the opener length. ---
+# A three-backtick run cannot close a four-backtick fence, while a four-
+# backtick run can close a three-backtick fence.
+DIR_LEN_BOUNDARY="${TMPDIR_TEST}/fence-length-boundary"
+mkdir -p "${DIR_LEN_BOUNDARY}"
+cat >"${DIR_LEN_BOUNDARY}/shorter-run.md" <<'MD'
+# A shorter run stays inside the fence
+
+````text
+```
+<inside>
+<br>
+````
+
+Prose with <outside> after the block.
+MD
+cat >"${DIR_LEN_BOUNDARY}/longer-closer.md" <<'MD'
+# A longer run closes the fence
+
+```
+code
+````
+
+Prose with <outside> after the block.
+MD
+
+run "${DIR_LEN_BOUNDARY}"
+check_rc_nonzero "fence-length-boundary-exits-nonzero"
+check_absent     "shorter-run-keeps-word-hidden" "shorter-run.md:5:"
+check_absent     "shorter-run-keeps-void-hidden" "shorter-run.md:6:"
+check_contains   "equal-closer-reopens-prose" "shorter-run.md:9:"
+check_contains   "longer-closer-reopens-prose" "longer-closer.md:7:"
+
+# --- Fixture 5b: a different delimiter does not close the active fence. ---
+# A tilde run inside a backtick fence is code content. Dropping the delimiter-
+# character check would expose both hazards before the real backtick closer.
+DIR_CROSS_DELIMITER="${TMPDIR_TEST}/cross-delimiter"
+mkdir -p "${DIR_CROSS_DELIMITER}"
+cat >"${DIR_CROSS_DELIMITER}/cross-delimiter.md" <<'MD'
+# Cross-delimiter content
+
+```text
+~~~
+<placeholder>
+<br>
+```
+MD
+
+run "${DIR_CROSS_DELIMITER}"
+check_rc_zero "cross-delimiter-exits-zero"
+check_absent  "cross-delimiter-no-word-violation" "bare <word> tag"
+check_absent  "cross-delimiter-no-void-violation" "non-self-closing void element"
+
 # --- Fixture 6: fence opener indented beneath a list item. ---
 # The tracker used to anchor on column 1, so an indented fence never opened and
 # its contents were scanned as prose. Three spaces is the normal list-item case.
@@ -294,16 +381,20 @@ cat >"${DIR_IND_OPEN}/indented-opener.md" <<'MD'
    <placeholder>
    gate <= 2
    ```
+   Post-close prose with <outside>.
+   <br>
 MD
 
 run "${DIR_IND_OPEN}"
-check_rc_zero "indented-opener-exits-zero"
-check_absent  "indented-opener-hides-check-1" "non-self-closing void element"
-check_absent  "indented-opener-hides-check-2" "bare { outside code fence"
-check_absent  "indented-opener-hides-check-3" "HTML comment outside code fence"
-check_absent  "indented-opener-hides-check-4" "autolink outside code fence"
-check_absent  "indented-opener-hides-check-5" "bare <word> tag"
-check_absent  "indented-opener-hides-check-6" "bare < not starting a valid tag"
+check_rc_nonzero "indented-opener-exits-nonzero"
+check_absent     "indented-opener-hides-check-1" "indented-opener.md:6:"
+check_absent     "indented-opener-hides-check-2" "indented-opener.md:7:"
+check_absent     "indented-opener-hides-check-3" "indented-opener.md:8:"
+check_absent     "indented-opener-hides-check-4" "indented-opener.md:9:"
+check_absent     "indented-opener-hides-check-5" "indented-opener.md:10:"
+check_absent     "indented-opener-hides-check-6" "indented-opener.md:11:"
+check_contains   "indented-opener-closer-exposes-check-5" "indented-opener.md:13:"
+check_contains   "indented-opener-closer-exposes-check-1" "indented-opener.md:14:"
 
 # --- Fixture 7: closer indented independently of the opener. ---
 # The closing fence may itself be indented 0-3 spaces, and its indent is NOT
@@ -319,11 +410,14 @@ kubectl get <pod>
    ```
 
 Prose after the block with <placeholder> must still be flagged.
+
+<br>
 MD
 
 run "${DIR_IND_CLOSE}"
 check_rc_nonzero "indented-closer-exits-nonzero"
 check_contains   "indented-closer-reopens-prose" "bare <word> tag"
+check_contains   "indented-closer-reopens-void" "non-self-closing void element"
 
 # --- Fixture 7b: the inverse — indented opener, column-zero closer. ---
 # Fixture 7 covers opener-0/closer-3; this covers opener-3/closer-0. Both
@@ -340,11 +434,14 @@ cat >"${DIR_IND_CLOSE2}/indented-opener-flush-closer.md" <<'MD'
 ```
 
 Prose after the block with <placeholder> must still be flagged.
+
+<br>
 MD
 
 run "${DIR_IND_CLOSE2}"
 check_rc_nonzero "inverse-closer-exits-nonzero"
 check_contains   "inverse-closer-reopens-prose" "bare <word> tag"
+check_contains   "inverse-closer-reopens-void" "non-self-closing void element"
 
 # --- Fixture 8: a fence line with an info string never closes a block. ---
 # A closer must be the delimiter followed only by whitespace; ```yaml is an
@@ -437,6 +534,19 @@ printf '# Tab-indented delimiter\n\n\t```\n\t<pod>\n\t```\n' >"${DIR_TAB}/tab-fe
 run "${DIR_TAB}"
 check_rc_nonzero "tab-fence-exits-nonzero"
 check_contains   "tab-fence-reported" "bare <word> tag"
+
+# --- Fixture 12b: a tab-separated marker does not create narrow list scope. ---
+# Its content starts at visual column 4, outside the <=3 approximation. A
+# three-space fence is therefore top-level; treating the tab as one space would
+# end it at the following outdent and report code content as prose.
+DIR_TAB_MARKER="${TMPDIR_TEST}/tab-marker"
+mkdir -p "${DIR_TAB_MARKER}"
+printf '1.\tItem\n\n   ```\n   <inside>\n   <br>\nProse with <outside> after.\n' >"${DIR_TAB_MARKER}/tab-marker.md"
+
+run "${DIR_TAB_MARKER}"
+check_rc_zero "tab-marker-exits-zero"
+check_absent  "tab-marker-no-word-violation" "bare <word> tag"
+check_absent  "tab-marker-no-void-violation" "non-self-closing void element"
 
 # --- Fixture 13: CRLF-terminated closing fence still closes the block. ---
 # awk keeps the \r on a CRLF line, so a bare closer arrives as "```\r". A
@@ -591,6 +701,54 @@ run "${DIR_EOF_FENCE}"
 check_rc_zero "eof-fence-exits-zero"
 check_absent  "eof-fence-no-word-violation" "bare <word> tag"
 check_absent  "eof-fence-no-void-violation" "non-self-closing void element"
+
+# --- Fixture 16e: one-digit later ordered items preserve direct-list scope. ---
+# Recognize 2.-9) only after an ordered list is active. A standalone 2. remains
+# prose because it cannot interrupt a CommonMark paragraph.
+DIR_LATER_ORDERED="${TMPDIR_TEST}/later-ordered"
+mkdir -p "${DIR_LATER_ORDERED}"
+cat >"${DIR_LATER_ORDERED}/dot.md" <<'MD'
+1. First
+2. Second
+
+   ```
+   nested code
+Prose with <dot-item> after the list.
+MD
+cat >"${DIR_LATER_ORDERED}/paren.md" <<'MD'
+1) First
+3) Third
+
+   ```
+   nested code
+<br>
+MD
+cat >"${DIR_LATER_ORDERED}/after-fence.md" <<'MD'
+1. First
+
+   ```
+   nested code
+2. Second
+
+   ```
+   more nested code
+Prose with <after-fence> after the list.
+MD
+cat >"${DIR_LATER_ORDERED}/prose.md" <<'MD'
+Paragraph text
+2. continuation
+
+   ```
+   <inside>
+Prose with <outside> after.
+MD
+
+run "${DIR_LATER_ORDERED}"
+check_rc_nonzero "later-ordered-exits-nonzero"
+check_contains   "dot-item-outdent-reopens-prose" "dot.md:6:"
+check_contains   "paren-item-outdent-reopens-prose" "paren.md:6:"
+check_contains   "later-item-reprocessed-at-fence-boundary" "after-fence.md:9:"
+check_absent     "later-marker-does-not-interrupt-prose" "prose.md:"
 
 if (( fails > 0 )); then
     echo "${fails} test(s) failed"
