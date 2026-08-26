@@ -240,8 +240,10 @@ contract after ordinary overrides. The DRA/GPU Operator integration is the
 worked example: AICR merges the configured DRA eviction label into
 `kubeletPlugin.nodeSelector` and writes the same label key to GPU Operator's
 `NODE_LABEL_FOR_GPU_POD_EVICTION`. This exception must remain gated on both
-components being enabled and must be covered across every deployer. Ordinary
-workload placement still uses registry paths and must not grow a special flag.
+components being enabled, must reject dynamic declarations that could move
+either managed path to install-time configuration, and must be covered across
+every deployer. Ordinary workload placement still uses registry paths and must
+not grow a special flag.
 
 **Deciding where a knob belongs:**
 

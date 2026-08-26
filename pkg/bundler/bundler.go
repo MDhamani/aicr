@@ -263,6 +263,10 @@ func (b *DefaultBundler) Make(ctx context.Context, recipeResult *recipe.RecipeRe
 		return nil, errors.New(errors.ErrCodeInvalidRequest,
 			"bundler config is required; construct the bundler with New")
 	}
+	if err := b.Config.Validate(); err != nil {
+		return nil, errors.PropagateOrWrap(err, errors.ErrCodeInvalidRequest,
+			"invalid bundler configuration")
+	}
 
 	// Reject incoherent component refs (e.g. a Helm ref that also carries a
 	// Kustomize tag/path, which the deployers silently build as Kustomize)
@@ -323,13 +327,22 @@ func (b *DefaultBundler) Make(ctx context.Context, recipeResult *recipe.RecipeRe
 	if validationErr := ValidateAccountingValues(recipeResult, componentValues); validationErr != nil {
 		return nil, validationErr
 	}
+	dynamicValues, err := b.buildDynamicValuesMap(recipeResult.DataProvider())
+	if err != nil {
+		return nil, err
+	}
+	if dynamicErr := rejectDRAEvictionDynamicPaths(recipeResult, dynamicValues); dynamicErr != nil {
+		return nil, dynamicErr
+	}
 
 	// Bundler-derived integration values that must reflect the final resolved
 	// recipe state are applied AFTER extractComponentValues so global
 	// scheduling and user overrides cannot make either cross-chart contract
 	// drift. Every deployer sees the same final map.
 	b.injectDRAChartVersionAnnotation(componentValues, recipeResult)
-	b.injectDRAEvictionLabel(componentValues, recipeResult)
+	if evictionErr := b.injectDRAEvictionLabel(componentValues, recipeResult); evictionErr != nil {
+		return nil, evictionErr
+	}
 
 	if warningErr := b.warnMissingStorageClassForPVCs(ctx, recipeResult, componentValues); warningErr != nil {
 		return nil, warningErr
@@ -339,10 +352,6 @@ func (b *DefaultBundler) Make(ctx context.Context, recipeResult *recipe.RecipeRe
 		return nil, exposureErr
 	}
 
-	dynamicValues, err := b.buildDynamicValuesMap(recipeResult.DataProvider())
-	if err != nil {
-		return nil, err
-	}
 	if lockErr := profileBaseline.ValidateProfileLock(
 		ctx, recipeResult.ComponentRefs, componentValues, dynamicValues,
 	); lockErr != nil {
@@ -2828,14 +2837,16 @@ func renderGKECriticalPriorityQuota(namespace string, pods int) ([]byte, error) 
 // would otherwise pin to the pre-migration driver state.
 const draChartVersionAnnotation = header.Domain + "/gpu-operator-chart-version"
 
-// draComponentName / gpuOperatorComponentName are the registry-level
-// component names this injection couples together. Both must be
-// enabled in the filtered resolved recipe before the annotation is
-// written; recipes that disable either remain untouched.
+// draComponentName / gpuOperatorComponentName are the registry-level names
+// coupled by the bundler-owned DRA integrations. Both must be enabled in the
+// filtered resolved recipe before derived values are written; recipes that
+// disable either remain untouched.
 const (
-	gpuOperatorComponentName = "gpu-operator"
-	draComponentName         = "nvidia-dra-driver-gpu"
-	draEvictionEnvName       = "NODE_LABEL_FOR_GPU_POD_EVICTION"
+	gpuOperatorComponentName      = "gpu-operator"
+	draComponentName              = "nvidia-dra-driver-gpu"
+	draEvictionEnvName            = "NODE_LABEL_FOR_GPU_POD_EVICTION"
+	draEvictionNodeSelectorPath   = "kubeletPlugin.nodeSelector"
+	gpuOperatorDRAEvictionEnvPath = "driver.manager.env"
 )
 
 var (
@@ -2851,19 +2862,9 @@ func isGPUOperatorComponent(name string) bool {
 	return slices.Contains(gpuOperatorComponentNames, name)
 }
 
-// injectDRAEvictionLabel wires the GPU Operator and DRA driver halves of the
-// Driver Manager eviction contract when both components are enabled. DRA
-// kubelet plugins receive the configured key/value node selector, while GPU
-// Operators receive the same label key through their documented environment
-// variable. Injection happens after scheduling and user overrides so the two
-// values cannot drift; unrelated selectors and environment entries are kept.
-func (b *DefaultBundler) injectDRAEvictionLabel(
-	componentValues map[string]map[string]any,
-	recipeResult *recipe.RecipeResult,
-) {
-
-	if b == nil || b.Config == nil || componentValues == nil || recipeResult == nil {
-		return
+func draEvictionComponentNames(recipeResult *recipe.RecipeResult) ([]string, []string) {
+	if recipeResult == nil {
+		return nil, nil
 	}
 
 	draNames := make([]string, 0, 1)
@@ -2876,8 +2877,73 @@ func (b *DefaultBundler) injectDRAEvictionLabel(
 			gpuOperatorNames = append(gpuOperatorNames, ref.Name)
 		}
 	}
+	return draNames, gpuOperatorNames
+}
+
+// rejectDRAEvictionDynamicPaths keeps the bundler-owned eviction contract
+// static. Dynamic values are moved into operator-editable install-time files,
+// where either half could otherwise be changed independently after AICR has
+// made them consistent.
+func rejectDRAEvictionDynamicPaths(
+	recipeResult *recipe.RecipeResult,
+	dynamicValues map[string][]string,
+) error {
+
+	draNames, gpuOperatorNames := draEvictionComponentNames(recipeResult)
 	if len(draNames) == 0 || len(gpuOperatorNames) == 0 {
-		return
+		return nil
+	}
+
+	managedPaths := []struct {
+		componentNames []string
+		path           string
+	}{
+		{componentNames: draNames, path: draEvictionNodeSelectorPath},
+		{componentNames: gpuOperatorNames, path: gpuOperatorDRAEvictionEnvPath},
+	}
+	for _, managed := range managedPaths {
+		for _, componentName := range managed.componentNames {
+			for _, dynamicPath := range dynamicValues[componentName] {
+				if !valuePathsIntersect(dynamicPath, managed.path) {
+					continue
+				}
+				return errors.NewWithContext(
+					errors.ErrCodeInvalidRequest,
+					fmt.Sprintf("--dynamic declaration %s:%s intersects AICR-managed DRA eviction path %q", componentName, dynamicPath, managed.path),
+					map[string]any{
+						errCtxKeyComponent: componentName,
+						"path":             dynamicPath,
+						"managedPath":      managed.path,
+					},
+				)
+			}
+		}
+	}
+	return nil
+}
+
+func valuePathsIntersect(left, right string) bool {
+	return left == right || strings.HasPrefix(left, right+".") || strings.HasPrefix(right, left+".")
+}
+
+// injectDRAEvictionLabel wires the GPU Operator and DRA driver halves of the
+// Driver Manager eviction contract when both components are enabled. DRA
+// kubelet plugins receive the configured key/value node selector, while GPU
+// Operators receive the same label key through their documented environment
+// variable. Injection happens after scheduling and user overrides so the two
+// values cannot drift; unrelated selectors and environment entries are kept.
+func (b *DefaultBundler) injectDRAEvictionLabel(
+	componentValues map[string]map[string]any,
+	recipeResult *recipe.RecipeResult,
+) error {
+
+	if b == nil || b.Config == nil || componentValues == nil || recipeResult == nil {
+		return nil
+	}
+
+	draNames, gpuOperatorNames := draEvictionComponentNames(recipeResult)
+	if len(draNames) == 0 || len(gpuOperatorNames) == 0 {
+		return nil
 	}
 
 	label := b.Config.DRAEvictionNodeLabel()
@@ -2887,7 +2953,9 @@ func (b *DefaultBundler) injectDRAEvictionLabel(
 			values = make(map[string]any)
 			componentValues[name] = values
 		}
-		mergeDRAEvictionNodeSelector(values, label)
+		if err := mergeDRAEvictionNodeSelector(name, values, label); err != nil {
+			return err
+		}
 	}
 	for _, name := range gpuOperatorNames {
 		values := componentValues[name]
@@ -2895,19 +2963,32 @@ func (b *DefaultBundler) injectDRAEvictionLabel(
 			values = make(map[string]any)
 			componentValues[name] = values
 		}
-		upsertGPUOperatorDRAEvictionEnv(values, label.Key)
+		if err := upsertGPUOperatorDRAEvictionEnv(name, values, label.Key); err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
-func mergeDRAEvictionNodeSelector(values map[string]any, label config.NodeLabel) {
-	kubeletPlugin, _ := values["kubeletPlugin"].(map[string]any)
-	if kubeletPlugin == nil {
+func mergeDRAEvictionNodeSelector(componentName string, values map[string]any, label config.NodeLabel) error {
+	var kubeletPlugin map[string]any
+	rawKubeletPlugin, hasKubeletPlugin := values["kubeletPlugin"]
+	if !hasKubeletPlugin || rawKubeletPlugin == nil {
 		kubeletPlugin = make(map[string]any)
 		values["kubeletPlugin"] = kubeletPlugin
+	} else {
+		var ok bool
+		kubeletPlugin, ok = rawKubeletPlugin.(map[string]any)
+		if !ok {
+			return invalidDRAEvictionManagedValue(componentName, "kubeletPlugin", "an object", rawKubeletPlugin)
+		}
 	}
 
 	var nodeSelector map[string]any
-	switch current := kubeletPlugin["nodeSelector"].(type) {
+	rawNodeSelector := kubeletPlugin["nodeSelector"]
+	switch current := rawNodeSelector.(type) {
+	case nil:
+		nodeSelector = make(map[string]any)
 	case map[string]any:
 		nodeSelector = current
 	case map[string]string:
@@ -2916,28 +2997,53 @@ func mergeDRAEvictionNodeSelector(values map[string]any, label config.NodeLabel)
 			nodeSelector[key] = value
 		}
 	default:
-		nodeSelector = make(map[string]any)
+		return invalidDRAEvictionManagedValue(
+			componentName, draEvictionNodeSelectorPath, "an object", rawNodeSelector)
 	}
 	if label.Key != defaults.DRAEvictionNodeLabelKey {
 		delete(nodeSelector, defaults.DRAEvictionNodeLabelKey)
 	}
 	nodeSelector[label.Key] = label.Value
 	kubeletPlugin["nodeSelector"] = nodeSelector
+	return nil
 }
 
-func upsertGPUOperatorDRAEvictionEnv(values map[string]any, labelKey string) {
-	driver, _ := values["driver"].(map[string]any)
-	if driver == nil {
+func upsertGPUOperatorDRAEvictionEnv(componentName string, values map[string]any, labelKey string) error {
+	var driver map[string]any
+	rawDriver, hasDriver := values["driver"]
+	if !hasDriver || rawDriver == nil {
 		driver = make(map[string]any)
 		values["driver"] = driver
-	}
-	manager, _ := driver["manager"].(map[string]any)
-	if manager == nil {
-		manager = make(map[string]any)
-		driver["manager"] = manager
+	} else {
+		var ok bool
+		driver, ok = rawDriver.(map[string]any)
+		if !ok {
+			return invalidDRAEvictionManagedValue(componentName, "driver", "an object", rawDriver)
+		}
 	}
 
-	existingEnv, _ := manager["env"].([]any)
+	var manager map[string]any
+	rawManager, hasManager := driver["manager"]
+	if !hasManager || rawManager == nil {
+		manager = make(map[string]any)
+		driver["manager"] = manager
+	} else {
+		var ok bool
+		manager, ok = rawManager.(map[string]any)
+		if !ok {
+			return invalidDRAEvictionManagedValue(componentName, "driver.manager", "an object", rawManager)
+		}
+	}
+
+	var existingEnv []any
+	rawEnv, hasEnv := manager["env"]
+	if hasEnv && rawEnv != nil {
+		var ok bool
+		existingEnv, ok = rawEnv.([]any)
+		if !ok {
+			return invalidDRAEvictionManagedValue(componentName, gpuOperatorDRAEvictionEnvPath, "an array", rawEnv)
+		}
+	}
 	env := make([]any, 0, len(existingEnv)+1)
 	found := false
 	for _, entry := range existingEnv {
@@ -2961,6 +3067,19 @@ func upsertGPUOperatorDRAEvictionEnv(values map[string]any, labelKey string) {
 		})
 	}
 	manager["env"] = env
+	return nil
+}
+
+func invalidDRAEvictionManagedValue(componentName, path, wantType string, value any) error {
+	return errors.NewWithContext(
+		errors.ErrCodeInvalidRequest,
+		fmt.Sprintf("component %q value %q must be %s", componentName, path, wantType),
+		map[string]any{
+			errCtxKeyComponent: componentName,
+			"path":             path,
+			"type":             fmt.Sprintf("%T", value),
+		},
+	)
 }
 
 // injectDRAChartVersionAnnotation writes the resolved gpu-operator

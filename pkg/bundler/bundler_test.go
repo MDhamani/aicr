@@ -713,6 +713,25 @@ func TestMake_NilConfigFailsClosed(t *testing.T) {
 	}
 }
 
+func TestMake_InvalidConfigFailsClosed(t *testing.T) {
+	bundler := &DefaultBundler{Config: config.NewConfig(
+		config.WithDRAEvictionNodeLabel(config.NodeLabel{
+			Key: "not a label key", Value: "true",
+		}),
+	)}
+	recipeResult := &recipe.RecipeResult{
+		ComponentRefs: []recipe.ComponentRef{{Name: "gpu-operator"}},
+	}
+
+	_, err := bundler.Make(t.Context(), recipeResult, t.TempDir())
+	if !stderrors.Is(err, errors.New(errors.ErrCodeInvalidRequest, "")) {
+		t.Fatalf("Make() error = %v, want ErrCodeInvalidRequest", err)
+	}
+	if !strings.Contains(err.Error(), "invalid node label key") {
+		t.Fatalf("Make() error = %v, want invalid node label context", err)
+	}
+}
+
 func TestMake_Success(t *testing.T) {
 	bundler, err := New()
 	if err != nil {
