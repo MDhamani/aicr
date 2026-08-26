@@ -183,6 +183,10 @@ func New(opts ...Option) (*DefaultBundler, error) {
 	for _, opt := range opts {
 		opt(db)
 	}
+	if err := db.Config.Validate(); err != nil {
+		return nil, errors.PropagateOrWrap(err, errors.ErrCodeInvalidRequest,
+			"invalid bundler configuration")
+	}
 
 	// Fail fast: if attestation is requested, verify that the binary attestation
 	// file exists before any expensive work (OIDC auth, recipe resolution, bundle
@@ -320,12 +324,12 @@ func (b *DefaultBundler) Make(ctx context.Context, recipeResult *recipe.RecipeRe
 		return nil, validationErr
 	}
 
-	// Bundler-derived annotations that must reflect the final resolved
-	// recipe state, applied AFTER extractComponentValues so that user
-	// --set overrides cannot defeat them. Every deployer (Helm,
-	// helmfile, Flux, Argo CD, argocd-helm) sees the same final map.
-	// See issue #973.
+	// Bundler-derived integration values that must reflect the final resolved
+	// recipe state are applied AFTER extractComponentValues so global
+	// scheduling and user overrides cannot make either cross-chart contract
+	// drift. Every deployer sees the same final map.
 	b.injectDRAChartVersionAnnotation(componentValues, recipeResult)
+	b.injectDRAEvictionLabel(componentValues, recipeResult)
 
 	if warningErr := b.warnMissingStorageClassForPVCs(ctx, recipeResult, componentValues); warningErr != nil {
 		return nil, warningErr
@@ -2831,6 +2835,7 @@ const draChartVersionAnnotation = header.Domain + "/gpu-operator-chart-version"
 const (
 	gpuOperatorComponentName = "gpu-operator"
 	draComponentName         = "nvidia-dra-driver-gpu"
+	draEvictionEnvName       = "NODE_LABEL_FOR_GPU_POD_EVICTION"
 )
 
 var (
@@ -2844,6 +2849,118 @@ func isDRAComponent(name string) bool {
 
 func isGPUOperatorComponent(name string) bool {
 	return slices.Contains(gpuOperatorComponentNames, name)
+}
+
+// injectDRAEvictionLabel wires the GPU Operator and DRA driver halves of the
+// Driver Manager eviction contract when both components are enabled. DRA
+// kubelet plugins receive the configured key/value node selector, while GPU
+// Operators receive the same label key through their documented environment
+// variable. Injection happens after scheduling and user overrides so the two
+// values cannot drift; unrelated selectors and environment entries are kept.
+func (b *DefaultBundler) injectDRAEvictionLabel(
+	componentValues map[string]map[string]any,
+	recipeResult *recipe.RecipeResult,
+) {
+
+	if b == nil || b.Config == nil || componentValues == nil || recipeResult == nil {
+		return
+	}
+
+	draNames := make([]string, 0, 1)
+	gpuOperatorNames := make([]string, 0, 1)
+	for _, ref := range recipeResult.ComponentRefs {
+		switch {
+		case isDRAComponent(ref.Name):
+			draNames = append(draNames, ref.Name)
+		case isGPUOperatorComponent(ref.Name):
+			gpuOperatorNames = append(gpuOperatorNames, ref.Name)
+		}
+	}
+	if len(draNames) == 0 || len(gpuOperatorNames) == 0 {
+		return
+	}
+
+	label := b.Config.DRAEvictionNodeLabel()
+	for _, name := range draNames {
+		values := componentValues[name]
+		if values == nil {
+			values = make(map[string]any)
+			componentValues[name] = values
+		}
+		mergeDRAEvictionNodeSelector(values, label)
+	}
+	for _, name := range gpuOperatorNames {
+		values := componentValues[name]
+		if values == nil {
+			values = make(map[string]any)
+			componentValues[name] = values
+		}
+		upsertGPUOperatorDRAEvictionEnv(values, label.Key)
+	}
+}
+
+func mergeDRAEvictionNodeSelector(values map[string]any, label config.NodeLabel) {
+	kubeletPlugin, _ := values["kubeletPlugin"].(map[string]any)
+	if kubeletPlugin == nil {
+		kubeletPlugin = make(map[string]any)
+		values["kubeletPlugin"] = kubeletPlugin
+	}
+
+	var nodeSelector map[string]any
+	switch current := kubeletPlugin["nodeSelector"].(type) {
+	case map[string]any:
+		nodeSelector = current
+	case map[string]string:
+		nodeSelector = make(map[string]any, len(current)+1)
+		for key, value := range current {
+			nodeSelector[key] = value
+		}
+	default:
+		nodeSelector = make(map[string]any)
+	}
+	if label.Key != defaults.DRAEvictionNodeLabelKey {
+		delete(nodeSelector, defaults.DRAEvictionNodeLabelKey)
+	}
+	nodeSelector[label.Key] = label.Value
+	kubeletPlugin["nodeSelector"] = nodeSelector
+}
+
+func upsertGPUOperatorDRAEvictionEnv(values map[string]any, labelKey string) {
+	driver, _ := values["driver"].(map[string]any)
+	if driver == nil {
+		driver = make(map[string]any)
+		values["driver"] = driver
+	}
+	manager, _ := driver["manager"].(map[string]any)
+	if manager == nil {
+		manager = make(map[string]any)
+		driver["manager"] = manager
+	}
+
+	existingEnv, _ := manager["env"].([]any)
+	env := make([]any, 0, len(existingEnv)+1)
+	found := false
+	for _, entry := range existingEnv {
+		envMap, ok := entry.(map[string]any)
+		if !ok || envMap["name"] != draEvictionEnvName {
+			env = append(env, entry)
+			continue
+		}
+		if found {
+			continue
+		}
+		delete(envMap, "valueFrom")
+		envMap["value"] = labelKey
+		env = append(env, envMap)
+		found = true
+	}
+	if !found {
+		env = append(env, map[string]any{
+			"name":  draEvictionEnvName,
+			"value": labelKey,
+		})
+	}
+	manager["env"] = env
 }
 
 // injectDRAChartVersionAnnotation writes the resolved gpu-operator

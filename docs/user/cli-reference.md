@@ -1480,6 +1480,7 @@ aicr bundle [flags]
 | `--system-node-toleration` | | string[] | Toleration for system components (format: key=value:effect, repeatable) |
 | `--accelerated-node-selector` | | string[] | Node selector for accelerated/GPU nodes (format: key=value, repeatable) |
 | `--accelerated-node-toleration` | | string[] | Toleration for accelerated/GPU nodes (format: key=value:effect, repeatable) |
+| `--dra-eviction-node-label` | | string | Node label coordinating DRA kubelet-plugin eviction with GPU Operator driver upgrades (format: `key=value`; default: `nvidia.com/dra-kubelet-plugin=true`). Applied only when both components are enabled. |
 | `--workload-gate` | | string | Taint for nodewright-operator runtime required (format: key=value:effect or key:effect). This is a day 2 option for cluster scaling operations. |
 | `--workload-selector` | | string[] | Label selector for nodewright-customizations to prevent eviction of running training jobs (format: key=value, repeatable). Required when nodewright-customizations is enabled with training intent. |
 | `--nodes` | | int | Estimated number of GPU nodes (default: 0 = unset). At bundle time, written to Helm value paths declared in the registry under `nodeScheduling.nodeCountPaths`. |
@@ -1551,6 +1552,7 @@ spec:
         role: system
       acceleratedNodeTolerations:
         - "nvidia.com/gpu=present:NoSchedule"
+      draEvictionNodeLabel: nvidia.com/dra-kubelet-plugin=true
       nodes: 8
       storageClass: gp3
     attestation:
@@ -1623,6 +1625,28 @@ This results in:
 - All components from the recipe are bundled automatically
 - Each component creates a subdirectory in the output directory
 - Components are deployed in the order specified by `deploymentOrder` in the recipe
+
+#### DRA Driver Upgrade Eviction
+
+When a recipe includes both `nvidia-dra-driver-gpu` and `gpu-operator`, AICR automatically coordinates kubelet-plugin eviction during GPU driver container upgrades. The same behavior applies to the corresponding `-ocp` components. AICR merges the default `nvidia.com/dra-kubelet-plugin=true` selector into `kubeletPlugin.nodeSelector` and sets the GPU Operator `driver.manager.env` entry `NODE_LABEL_FOR_GPU_POD_EVICTION` to the same label key. Existing accelerated-node selectors and unrelated Driver Manager environment variables are preserved.
+
+Nodes intended for DRA GPU allocation must carry the matching label:
+
+```bash
+kubectl label node <node-name> nvidia.com/dra-kubelet-plugin=true
+```
+
+Use `--dra-eviction-node-label` when the cluster follows a different label convention. The flag accepts exactly one Kubernetes label in `key=value` form; AICR uses the full pair for DRA placement and the key for GPU Operator:
+
+```bash
+aicr bundle --recipe recipe.yaml \
+  --dra-eviction-node-label example.com/dra-ready=enabled \
+  --output bundle
+
+kubectl label node <node-name> example.com/dra-ready=enabled
+```
+
+The wiring is absent when either component is disabled. Direct value overrides for the managed selector key or `NODE_LABEL_FOR_GPU_POD_EVICTION` are overwritten so the cross-chart contract cannot drift. See NVIDIA's [GPU Operator DRA installation guide](https://docs.nvidia.com/datacenter/cloud-native/gpu-operator/26.3/dra-intro-install.html) for the upstream driver-upgrade requirement.
 
 #### Storage Class
 

@@ -1285,6 +1285,7 @@ paths:
         - $ref: "#/components/parameters/SystemNodeToleration"
         - $ref: "#/components/parameters/AcceleratedNodeSelector"
         - $ref: "#/components/parameters/AcceleratedNodeToleration"
+        - $ref: "#/components/parameters/DRAEvictionNodeLabel"
         - $ref: "#/components/parameters/BundleDeployer"
         - $ref: "#/components/parameters/BundleRepo"
         - $ref: "#/components/parameters/WorkloadGate"
@@ -1570,6 +1571,18 @@ paths:
           style: form
           explode: true
           example: ["nvidia.com/gpu=present:NoSchedule"]
+        - name: dra-eviction-node-label
+          in: query
+          required: false
+          description: >
+            Single node label coordinating NVIDIA DRA kubelet-plugin eviction
+            with GPU Operator driver upgrades (format: key=value). The selector
+            and Driver Manager environment variable are injected only when both
+            components are enabled.
+          schema:
+            type: string
+            default: nvidia.com/dra-kubelet-plugin=true
+          example: "example.com/dra-ready=enabled"
         - name: deployer
           in: query
           required: false
@@ -2149,6 +2162,18 @@ components:
           type: string
       style: form
       explode: true
+    DRAEvictionNodeLabel:
+      name: dra-eviction-node-label
+      in: query
+      required: false
+      description: >
+        Single key=value node label coordinating NVIDIA DRA kubelet-plugin
+        eviction with GPU Operator driver upgrades. Applied only when both
+        components are enabled.
+      schema:
+        type: string
+        default: nvidia.com/dra-kubelet-plugin=true
+      example: "example.com/dra-ready=enabled"
     BundleDeployer:
       name: deployer
       in: query
