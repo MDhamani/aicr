@@ -64,12 +64,17 @@ const surfaceHeader = `# aicr CLI surface baseline — do NOT hand-edit.
 // it would make the gate cry wolf on every wording fix.
 func flagFacts(path string, f cli.Flag) string {
 	names := append([]string(nil), f.Names()...)
-	// urfave returns the primary name first and aliases after; preserving that
-	// order matters because `--gpu` being promoted over `--accelerator` is a
-	// contract change, not a reordering.
+	// Order is preserved, not sorted: urfave returns the primary name first and
+	// aliases after, and `--gpu` being promoted over `--accelerator` is a
+	// contract change rather than a reordering.
+	//
+	// The dash prefix is chosen by name length alone, independent of position.
+	// Keying it on position instead would render a single-character *primary*
+	// name as `--x`, which is not how it is invoked. No flag in the tree has one
+	// today, so this is future-proofing rather than a live fix.
 	rendered := make([]string, 0, len(names))
-	for i, n := range names {
-		if i == 0 || len(n) > 1 {
+	for _, n := range names {
+		if len(n) > 1 {
 			rendered = append(rendered, "--"+n)
 			continue
 		}
@@ -358,5 +363,60 @@ func TestCollectSurfaceRecordsCommandAliases(t *testing.T) {
 			t.Error("dropping an alias left the recorded line unchanged; " +
 				"command aliases are not actually pinned")
 		}
+	}
+}
+
+// TestFlagFactsRendersDashPrefixByNameLength pins the dash-prefix rule against
+// a synthetic flag whose PRIMARY name is a single character.
+//
+// The golden cannot cover this: every flag in the tree has a multi-character
+// primary name, so an implementation that keyed the prefix on position rather
+// than length produces a byte-identical baseline and looks correct forever. The
+// first short primary name anyone adds would then be recorded as `--x`, which
+// is not how it is invoked, and the surface gate would pin the wrong contract.
+func TestFlagFactsRendersDashPrefixByNameLength(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		flag cli.Flag
+		want string
+	}{
+		{
+			name: "single-char primary renders with one dash",
+			flag: &cli.StringFlag{Name: "x", Aliases: []string{"extra"}},
+			want: "-x,--extra",
+		},
+		{
+			name: "long primary with short alias keeps both forms",
+			flag: &cli.StringFlag{Name: "recipe", Aliases: []string{"r"}},
+			want: "--recipe,-r",
+		},
+		{
+			name: "long primary with long alias",
+			flag: &cli.StringFlag{Name: "accelerator", Aliases: []string{"gpu"}},
+			want: "--accelerator,--gpu",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got := flagFacts("aicr test", tt.flag)
+			// flagFacts renders "flag    <path>  <names>  type=..."; the names
+			// field is what this test is about.
+			_, rest, ok := strings.Cut(got, "aicr test  ")
+			if !ok {
+				t.Fatalf("unexpected flagFacts layout: %q", got)
+			}
+			names, _, ok := strings.Cut(rest, "  type=")
+			if !ok {
+				t.Fatalf("unexpected flagFacts layout: %q", got)
+			}
+			if names != tt.want {
+				t.Errorf("rendered names = %q, want %q", names, tt.want)
+			}
+		})
 	}
 }

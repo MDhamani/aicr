@@ -63,10 +63,14 @@ for the release-by-release table.
 ### Empty `apiVersion` on artifacts
 
 **Surface:** bundle and artifact schemas ·
-**Deprecated in:** v0.22 · **Removed in:** v0.23
+**Deprecated in:** v0.22 ·
+**Removed in:** v0.23 for `RecipeResult` inputs; **already removed in v0.21**
+for `RecipeMetadata` overlays
 
 Artifacts predating the `apiVersion` field load today with the field absent or
-empty. That tolerance retires alongside the alpha values.
+empty. That tolerance retires alongside the alpha values — except for
+`RecipeMetadata`, which lost it a release early and without a warning window;
+see below.
 
 One narrowing landed earlier than the rest: as of v0.21, a `RecipeMetadata`
 overlay passed directly (`aicr recipe -r overlay.yaml`,

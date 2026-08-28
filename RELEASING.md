@@ -58,8 +58,10 @@ Every deprecation appears in all three places. One is not a substitute for
 another: release notes are read once, the durable page is read later by someone
 debugging, and the runtime warning reaches the user who never read either.
 
-1. A `## Deprecations` section in the release notes for the release that
-   introduces it, naming the replacement and the planned removal release.
+1. A `### Deprecations` section in the release notes for the release that
+   introduces it, naming the replacement and the planned removal release. The
+   heading is an h3 sibling of `### Highlights`; the release-notes generator
+   (`.agents/skills/aicr-release-notes/SKILL.md`) emits it at that level.
 2. An entry on the durable page at
    [`docs/user/deprecations.md`](docs/user/deprecations.md), which carries every
    active deprecation and its removal release until the removal ships.
