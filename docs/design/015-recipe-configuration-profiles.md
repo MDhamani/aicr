@@ -213,10 +213,9 @@ target state, gated by this rule.
 
 ```yaml
 # recipes/overlays/gke-cos.yaml — device-plugin ownership
-# Shown with the post-DD5 value set. DD5's durable marker, not yet
-# identified, will additionally land as symmetric constraints on
-# operator and operator-selfdriver at that event — the constraints
-# drawn here are therefore not yet the declarable post-DD5 state.
+# Shown with the post-DD5 value set as drawn. Amended 2026-08-24:
+# operator-selfdriver shipped as bundle-installer, REPLACING operator
+# (shipped driver-installer) — see the Deferred Decision 5 resolution.
 spec:
   profile:
     name: gpuStack
@@ -306,9 +305,10 @@ step 2 describes. Selection:
 # gke-default (declared default; drawn above as csp-managed) — no flag needed
 aicr recipe --service gke --os cos --accelerator h100 --intent inference
 
-# explicit alternative configuration (shipped name; drawn above as operator)
+# explicit alternative configuration (shipped name; drawn above as
+# operator-selfdriver)
 aicr recipe --service gke --os cos --accelerator h100 --intent inference \
-  --profile gpuStack=driver-installer
+  --profile gpuStack=bundle-installer
 ```
 
 A profile fragment may reference only components **enabled in the
@@ -1467,6 +1467,9 @@ recurrence — the shape the Problem section expects.
    draws that end state), which is a family-wide re-qualification and
    evidence re-signing event.
 
+   *Amended 2026-08-24 (#1716):* shipped as `bundle-installer`, replacing
+   `driver-installer` (breaking; same pool shape — see Deferred Decision 5).
+
    Any dcgm-exporter GPU-ID-mapping adjustment for `csp-managed` is an
    external GKE behavior not verifiable from this repository. It is
    verified and added during this step if required, with upstream
@@ -1505,8 +1508,8 @@ work that resolves it.
    GKE's managed driver install, so the standalone gate's prerequisite
    needed the profile's per-value pairing), and the GKE `gpuStack`
    profile now consumes the form per selected value (#1761 rollout
-   PR 3): positive for `driver-installer`, negated for the
-   `gke-default` default.
+   PR 3): positive for `driver-installer` (since replaced by
+   `bundle-installer`), negated for the `gke-default` default.
 3. **AKS node-pool-mode signal — resolved by the 2026-07-27 amendment.**
    The provider-facing AgentPool `gpuProfile.driver` property is the
    durable ownership marker. AKS adoption projects it into a snapshot
