@@ -18,6 +18,7 @@ import (
 	"context"
 
 	bundlerconfig "github.com/NVIDIA/aicr/pkg/bundler/config"
+	"github.com/NVIDIA/aicr/pkg/defaults"
 	"github.com/NVIDIA/aicr/pkg/errors"
 	"github.com/NVIDIA/aicr/pkg/mirror"
 )
@@ -86,11 +87,31 @@ type MirrorComponent struct {
 	Warnings []string
 }
 
+// MirrorValueOverride sets one component value before discovery.
+//
+// Facade-owned rather than pkg/bundler/config.ComponentPath: exposing that type
+// in a public signature would put an internal package in the frozen SDK
+// surface, so every field it gains or loses becomes an SDK semver event for a
+// package the SDK does not own.
+type MirrorValueOverride struct {
+	// Component is the value-override key for the component, matching what
+	// `--set <component>:<path>=<value>` accepts.
+	Component string
+
+	// Path is the dotted path within that component's values.
+	Path string
+
+	// Value is the override. Nil marks the path dynamic (the `--dynamic`
+	// form) rather than setting it, which is why this is a pointer: an empty
+	// string is a legitimate value distinct from "no value".
+	Value *string
+}
+
 // MirrorInventoryOption configures a mirror inventory request.
 type MirrorInventoryOption func(*mirrorInventoryOptions)
 
 type mirrorInventoryOptions struct {
-	valueOverrides []bundlerconfig.ComponentPath
+	valueOverrides []MirrorValueOverride
 	kubeVersion    string
 }
 
@@ -100,7 +121,7 @@ type mirrorInventoryOptions struct {
 // sub-component removes its images from the inventory, so a caller mirroring
 // for an air-gapped install must pass the same overrides they will bundle with
 // or they will mirror the wrong set.
-func WithMirrorValueOverrides(overrides []bundlerconfig.ComponentPath) MirrorInventoryOption {
+func WithMirrorValueOverrides(overrides []MirrorValueOverride) MirrorInventoryOption {
 	return func(o *mirrorInventoryOptions) {
 		o.valueOverrides = overrides
 	}
@@ -129,12 +150,28 @@ func (c *Client) MirrorInventory(
 ) (*MirrorInventory, error) {
 
 	if c == nil {
-		return nil, errors.New(errors.ErrCodeInvalidRequest, "client is required")
+		return nil, errors.New(errors.ErrCodeInvalidRequest, "aicr client not initialized")
+	}
+	if ctx == nil {
+		return nil, errors.New(errors.ErrCodeInvalidRequest, "context is required (got nil)")
 	}
 	if rec == nil {
 		return nil, errors.New(errors.ErrCodeInvalidRequest,
 			"recipe is required to discover mirror inventory")
 	}
+
+	// Discovery renders every component's chart, so a closed Client must be
+	// rejected before that work starts, and an in-flight run must keep Close
+	// from returning underneath it.
+	c.mu.RLock()
+	if c.builder == nil {
+		c.mu.RUnlock()
+		return nil, errors.New(errors.ErrCodeInvalidRequest,
+			"aicr client not initialized (or already closed)")
+	}
+	c.inflight.Add(1)
+	c.mu.RUnlock()
+	defer c.inflight.Done()
 
 	settings := &mirrorInventoryOptions{}
 	for _, opt := range opts {
@@ -155,9 +192,12 @@ func (c *Client) MirrorInventory(
 		kubeVersion = mirror.KubeVersionFromConstraints(internal.Constraints)
 	}
 
+	ctx, cancel := context.WithTimeout(ctx, defaults.RecipeOperationTimeout)
+	defer cancel()
+
 	lister := mirror.NewLister(
 		mirror.WithVersion(c.version),
-		mirror.WithValueOverrides(settings.valueOverrides),
+		mirror.WithValueOverrides(toInternalOverrides(settings.valueOverrides)),
 		mirror.WithKubeVersion(kubeVersion),
 	)
 
@@ -166,6 +206,22 @@ func (c *Client) MirrorInventory(
 		return nil, err
 	}
 	return wrapMirrorList(discovered), nil
+}
+
+// toInternalOverrides projects facade overrides onto the bundler's shape.
+func toInternalOverrides(overrides []MirrorValueOverride) []bundlerconfig.ComponentPath {
+	if overrides == nil {
+		return nil
+	}
+	internal := make([]bundlerconfig.ComponentPath, 0, len(overrides))
+	for _, override := range overrides {
+		internal = append(internal, bundlerconfig.ComponentPath{
+			Component: override.Component,
+			Path:      override.Path,
+			Value:     override.Value,
+		})
+	}
+	return internal
 }
 
 // wrapMirrorList projects the internal discovery result onto facade types.

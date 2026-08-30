@@ -89,7 +89,12 @@ func TestStability_RecipeResolution(t *testing.T) {
 	// Mirror inventory: air-gap tooling depends on this shape, and rendering
 	// deliberately stays out of the SDK (#2025).
 	requireSignature[func(*aicr.Client, context.Context, *aicr.RecipeResult, ...aicr.MirrorInventoryOption) (*aicr.MirrorInventory, error)]((*aicr.Client).MirrorInventory)
-	requireSignature[func([]bundlerconfig.ComponentPath) aicr.MirrorInventoryOption](aicr.WithMirrorValueOverrides)
+	requireSignature[func([]aicr.MirrorValueOverride) aicr.MirrorInventoryOption](aicr.WithMirrorValueOverrides)
+
+	var override aicr.MirrorValueOverride
+	_ = override.Component
+	_ = override.Path
+	_ = override.Value
 	requireSignature[func(string) aicr.MirrorInventoryOption](aicr.WithMirrorKubeVersion)
 
 	var inventory aicr.MirrorInventory

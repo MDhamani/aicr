@@ -2,6 +2,7 @@ package aicr_test
 
 import (
 	stderrors "errors"
+	"strings"
 	"testing"
 
 	aicr "github.com/NVIDIA/aicr/pkg/client/v1"
@@ -71,5 +72,63 @@ func TestMirrorInventory_NilClient(t *testing.T) {
 
 	if _, err := client.MirrorInventory(t.Context(), nil); err == nil {
 		t.Fatal("expected an error from a nil Client")
+	}
+}
+
+// The Client-boundary counterfactuals below are the cases a passing suite did
+// not exercise, and each one failed before the guards were added: a nil or
+// closed Client returned a normal result, and a nil context reached discovery.
+//
+// The criteria case is the sharpest. CriteriaRegistry() is deliberately lenient
+// -- a nil or closed Client yields a fresh ephemeral registry so callers can use
+// it defensively -- so without an explicit guard the method silently derived
+// criteria against the DEFAULT registry and returned them with no error. An
+// external --data catalog's registered values would simply be missing, which is
+// the one failure this method exists to prevent.
+
+func TestClientBoundary_NilClientIsRejected(t *testing.T) {
+	var client *aicr.Client
+
+	if _, err := client.CriteriaFromSnapshot(&aicr.Snapshot{}); err == nil {
+		t.Error("CriteriaFromSnapshot on a nil Client returned no error; it would " +
+			"have used the default registry instead of the Client's provider")
+	}
+	if _, err := client.MirrorInventory(t.Context(), &aicr.RecipeResult{}); err == nil {
+		t.Error("MirrorInventory on a nil Client returned no error")
+	}
+}
+
+func TestClientBoundary_NilContextIsRejected(t *testing.T) {
+	client := newSnapshotCriteriaClient(t)
+
+	//nolint:staticcheck // passing a nil context is the case under test
+	_, err := client.MirrorInventory(nil, &aicr.RecipeResult{})
+	if err == nil {
+		t.Fatal("MirrorInventory accepted a nil context")
+	}
+	if !stderrors.Is(err, errors.New(errors.ErrCodeInvalidRequest, "")) {
+		t.Errorf("error = %v, want ErrCodeInvalidRequest", err)
+	}
+	if !strings.Contains(err.Error(), "context") {
+		t.Errorf("error = %q, want it to name the context; a nil context must not "+
+			"be reported as a recipe problem", err)
+	}
+}
+
+func TestClientBoundary_ClosedClientIsRejected(t *testing.T) {
+	client, err := aicr.NewClient(aicr.WithRecipeSource(aicr.EmbeddedSource()))
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	if closeErr := client.Close(); closeErr != nil {
+		t.Fatalf("Close: %v", closeErr)
+	}
+
+	if _, err := client.CriteriaFromSnapshot(&aicr.Snapshot{}); err == nil {
+		t.Error("CriteriaFromSnapshot on a closed Client returned no error; the " +
+			"provider it was scoped to is gone")
+	}
+	if _, err := client.MirrorInventory(t.Context(), &aicr.RecipeResult{}); err == nil {
+		t.Error("MirrorInventory on a closed Client returned no error")
 	}
 }

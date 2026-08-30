@@ -636,10 +636,30 @@ func (c *Client) CriteriaRegistry() *CriteriaRegistry {
 // Returns ErrCodeInvalidRequest for a nil snapshot, since a caller asking for
 // criteria from nothing has a bug rather than an empty result.
 func (c *Client) CriteriaFromSnapshot(snap *Snapshot) (*Criteria, error) {
+	// The lifecycle guards are not boilerplate here. CriteriaRegistry() is
+	// deliberately lenient -- a nil or closed Client gets a fresh ephemeral
+	// registry so callers can use it defensively -- so without these checks a
+	// nil or closed Client silently derived criteria against the DEFAULT
+	// registry and returned them with no error. That is the one thing this
+	// method exists to avoid: an external --data catalog's registered values
+	// would be missing and the caller would never know.
+	if c == nil {
+		return nil, errors.New(errors.ErrCodeInvalidRequest, "aicr client not initialized")
+	}
 	if snap == nil {
 		return nil, errors.New(errors.ErrCodeInvalidRequest,
 			"snapshot is required to derive criteria")
 	}
+
+	c.mu.RLock()
+	if c.builder == nil {
+		c.mu.RUnlock()
+		return nil, errors.New(errors.ErrCodeInvalidRequest,
+			"aicr client not initialized (or already closed)")
+	}
+	c.inflight.Add(1)
+	c.mu.RUnlock()
+	defer c.inflight.Done()
 
 	internal := snap.Unwrap()
 	if internal == nil {

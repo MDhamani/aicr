@@ -188,7 +188,7 @@ func runMirrorListCmd(ctx context.Context, cmd *cli.Command) (err error) {
 	slog.Info("discovering images and charts", "components", len(rec.ComponentRefs))
 
 	inventory, err := client.MirrorInventory(ctx, aicr.WrapResolved(rec),
-		aicr.WithMirrorValueOverrides(valueOverrides))
+		aicr.WithMirrorValueOverrides(facadeValueOverrides(valueOverrides)))
 	if err != nil {
 		return err
 	}
@@ -320,4 +320,24 @@ func mirrorListFromInventory(inventory *aicr.MirrorInventory) *mirror.MirrorList
 		})
 	}
 	return list
+}
+
+// facadeValueOverrides projects parsed --set entries onto the facade shape.
+//
+// The facade deliberately does not accept pkg/bundler/config.ComponentPath, so
+// the conversion happens here rather than putting an internal type in the
+// frozen SDK surface.
+func facadeValueOverrides(overrides []config.ComponentPath) []aicr.MirrorValueOverride {
+	if overrides == nil {
+		return nil
+	}
+	out := make([]aicr.MirrorValueOverride, 0, len(overrides))
+	for _, override := range overrides {
+		out = append(out, aicr.MirrorValueOverride{
+			Component: override.Component,
+			Path:      override.Path,
+			Value:     override.Value,
+		})
+	}
+	return out
 }

@@ -688,3 +688,87 @@ func Example_criteriaDimensions() {
 	// os
 	// platform
 }
+
+// ExampleClient_CriteriaFromSnapshot derives recipe criteria from a captured
+// snapshot without reaching past the facade.
+//
+// This step previously required pkg/fingerprint, so the documented workflow
+// could not be completed with pkg/client/v1 alone.
+func ExampleClient_CriteriaFromSnapshot() {
+	ctx := context.Background()
+
+	client, err := aicr.NewClient(aicr.WithRecipeSource(aicr.EmbeddedSource()))
+	if err != nil {
+		log.Print(err)
+		return
+	}
+	defer func() { _ = client.Close() }()
+
+	snap, err := client.LoadSnapshot(ctx, "snapshot.yaml", "")
+	if err != nil {
+		log.Print(err)
+		return
+	}
+
+	// Every dimension the snapshot could not determine stays "any"; nothing is
+	// guessed. Layer your own stated values on top before resolving.
+	criteria, err := client.CriteriaFromSnapshot(snap)
+	if err != nil {
+		log.Print(err)
+		return
+	}
+	criteria.Intent = "training"
+
+	result, err := client.ResolveRecipeFromCriteria(ctx, criteria)
+	if err != nil {
+		log.Print(err)
+		return
+	}
+	fmt.Printf("resolved %d components\n", len(result.Components))
+}
+
+// ExampleClient_MirrorInventory lists every image and chart a recipe needs, for
+// staging into an air-gapped registry.
+//
+// Rendering is the caller's job: the facade returns data, and formats such as
+// Hauler or Zarf stay in the CLI so the SDK does not freeze third-party schemas
+// as contract.
+func ExampleClient_MirrorInventory() {
+	ctx := context.Background()
+
+	client, err := aicr.NewClient(aicr.WithRecipeSource(aicr.EmbeddedSource()))
+	if err != nil {
+		log.Print(err)
+		return
+	}
+	defer func() { _ = client.Close() }()
+
+	result, err := client.ResolveRecipeFromCriteria(ctx, &aicr.Criteria{
+		Service:     "eks",
+		Accelerator: "h100",
+		Intent:      "training",
+	})
+	if err != nil {
+		log.Print(err)
+		return
+	}
+
+	// Pass the same overrides you will bundle with. Disabling a sub-component
+	// removes its images, so mirroring without them stages the wrong set.
+	disabled := "false"
+	inventory, err := client.MirrorInventory(ctx, result,
+		aicr.WithMirrorValueOverrides([]aicr.MirrorValueOverride{
+			{Component: "gpuoperator", Path: "driver.enabled", Value: &disabled},
+		}))
+	if err != nil {
+		log.Print(err)
+		return
+	}
+
+	for _, image := range inventory.Images {
+		fmt.Println(image)
+	}
+	for _, chart := range inventory.Charts {
+		fmt.Printf("%s %s from %s\n", chart.Chart, chart.Version, chart.Repository)
+	}
+}

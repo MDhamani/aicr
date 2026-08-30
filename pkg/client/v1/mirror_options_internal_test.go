@@ -16,8 +16,6 @@ package aicr
 
 import (
 	"testing"
-
-	bundlerconfig "github.com/NVIDIA/aicr/pkg/bundler/config"
 )
 
 // Option forwarding is tested here, inside the package, because the honest
@@ -32,7 +30,7 @@ import (
 // case worth pinning.
 
 func TestMirrorInventoryOptions_AreApplied(t *testing.T) {
-	overrides := []bundlerconfig.ComponentPath{{Component: "gpuoperator"}}
+	overrides := []MirrorValueOverride{{Component: "gpuoperator", Path: "driver.enabled"}}
 
 	settings := &mirrorInventoryOptions{}
 	for _, opt := range []MirrorInventoryOption{
@@ -53,6 +51,41 @@ func TestMirrorInventoryOptions_AreApplied(t *testing.T) {
 		t.Errorf("valueOverrides = %+v, want the supplied override; an ignored "+
 			"override mirrors images for components the caller disabled",
 			settings.valueOverrides)
+	}
+}
+
+// TestMirrorValueOverride_ProjectsOntoTheBundlerShape pins the boundary
+// conversion.
+//
+// The facade type exists so pkg/bundler/config stays out of the frozen SDK
+// surface; that only holds if the projection carries every field. A dropped
+// Value would silently turn a --set override into a --dynamic one, which
+// changes the discovered image set rather than erroring.
+func TestMirrorValueOverride_ProjectsOntoTheBundlerShape(t *testing.T) {
+	value := "false"
+	got := toInternalOverrides([]MirrorValueOverride{
+		{Component: "gpuoperator", Path: "driver.enabled", Value: &value},
+		{Component: "nfd", Path: "worker.enabled"},
+	})
+
+	if len(got) != 2 {
+		t.Fatalf("converted %d overrides, want 2", len(got))
+	}
+	if got[0].Component != "gpuoperator" || got[0].Path != "driver.enabled" {
+		t.Errorf("first override = %+v, want the supplied component and path", got[0])
+	}
+	if got[0].Value == nil || *got[0].Value != "false" {
+		t.Errorf("first override Value = %v, want %q; dropping it turns a set "+
+			"override into a dynamic one and changes the discovered images",
+			got[0].Value, "false")
+	}
+	if got[1].Value != nil {
+		t.Errorf("second override Value = %v, want nil preserved as dynamic",
+			got[1].Value)
+	}
+
+	if toInternalOverrides(nil) != nil {
+		t.Error("nil overrides should project to nil, not an empty slice")
 	}
 }
 
