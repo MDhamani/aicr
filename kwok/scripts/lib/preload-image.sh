@@ -31,6 +31,12 @@
 # between invocations.
 KWOK_PRELOAD_BUDGET_DEFAULT=180
 
+# Retry backoff schedule, in seconds: doubles from START, capped at MAX. The cap
+# keeps a long budget from spending itself on one enormous sleep, which would
+# leave no attempt near the end of the window.
+PRELOAD_BACKOFF_START=5
+PRELOAD_BACKOFF_MAX=30
+
 # Side-load an image into the Kind node so the kubelet never pulls it.
 #
 # The registry and Gitea Deployments are the only two workloads in the KWOK
@@ -118,39 +124,71 @@ preload_image() {
         return 0
     fi
 
-    # Three attempts with linear backoff. The upstream failures seen in CI are
-    # transient resets and timeouts, which a second attempt seconds later
-    # clears; a longer schedule would just delay the kubelet fallback.
-    local attempt remaining
-    for attempt in 1 2 3; do
+    # Retry until the BUDGET is spent, not for a fixed number of attempts.
+    #
+    # The fixed three-attempt schedule this replaces gave up in ~17s while
+    # holding a 180s budget (#2483): each pull failed in about a second, the
+    # backoff was 5s then 10s, and ~163s went unused. Against a per-IP registry
+    # throttle that is close to the worst possible schedule — it retries fast
+    # enough to stay inside the same throttle window, then stops long before the
+    # window would reset.
+    #
+    # Evidence it is a throttle and not an outage: in the run that motivated
+    # this, 125 of 127 concurrent matrix jobs pulled the same image successfully
+    # at the same moment. The pull is not broken; a few callers are being shed.
+    #
+    # Backoff doubles from PRELOAD_BACKOFF_START and is capped, so a long budget
+    # spends most of its time waiting rather than hammering.
+    local attempt=0 remaining backoff="${PRELOAD_BACKOFF_START}" pull_err last_err=""
+    pull_err="$(mktemp)"
+    while :; do
         if preload_have_image "${image}" "${deadline}"; then
             break
         fi
         if ! remaining=$(preload_remaining "${deadline}"); then
-            log_warn "Preload budget exhausted pulling ${image}; the kubelet will retry in-cluster"
-            return 0
-        fi
-        log_info "Pulling ${image} on the host (attempt ${attempt}/3, ${remaining}s left)..."
-        if timeout "${remaining}" docker pull --quiet "${image}" >/dev/null 2>&1; then
             break
         fi
-        if (( attempt < 3 )); then
-            # Clamp the backoff to the budget. Sleeping past the deadline is
-            # pure dead time: it cannot buy another attempt, and it delays the
-            # kubelet fallback by exactly as long as it oversleeps. Without this
-            # the function's real ceiling is the budget PLUS the whole backoff
-            # schedule, not the budget.
-            local backoff=$(( attempt * 5 ))
-            remaining=$(preload_remaining "${deadline}") || break
-            if (( backoff > remaining )); then
-                backoff="${remaining}"
-            fi
-            sleep "${backoff}"
+
+        attempt=$(( attempt + 1 ))
+        log_info "Pulling ${image} on the host (attempt ${attempt}, ${remaining}s left)..."
+        if timeout "${remaining}" docker pull --quiet "${image}" >/dev/null 2>"${pull_err}"; then
+            break
+        fi
+        # Capture the cause the moment it happens, so it survives every later
+        # exit from this loop. Reading the file at the reporting site instead
+        # would lose it on any path that breaks out and deletes the file first.
+        last_err="$(tr '\n' ' ' < "${pull_err}" | tail -c 300)"
+
+        # Clamp the backoff to the budget. Sleeping past the deadline is pure
+        # dead time: it cannot buy another attempt, and it delays the kubelet
+        # fallback by exactly as long as it oversleeps.
+        remaining=$(preload_remaining "${deadline}") || break
+        if (( backoff > remaining )); then
+            backoff="${remaining}"
+        fi
+        sleep "${backoff}"
+
+        backoff=$(( backoff * 2 ))
+        if (( backoff > PRELOAD_BACKOFF_MAX )); then
+            backoff="${PRELOAD_BACKOFF_MAX}"
         fi
     done
+    rm -f "${pull_err}"
 
+    # ONE reporting site for every way the pull can end unsuccessfully. The
+    # loop has four exits (image already cached, budget spent before an
+    # attempt, pull succeeded, budget spent after a failed attempt) and an
+    # earlier version reported the cause on only one of them -- so a pull that
+    # consumed the last of the budget lost its own error message. Reporting
+    # here, from a variable captured at failure time, is what makes that
+    # impossible rather than merely fixed.
     if ! preload_have_image "${image}" "${deadline}"; then
-        log_warn "${image} is not cached after pulling (failed, or the budget ran out); the kubelet will retry in-cluster"
+        if [[ -n "${last_err}" ]]; then
+            log_warn "${image} is not cached after ${attempt} attempt(s); last error: ${last_err}"
+        else
+            log_warn "${image} is not cached and no pull was attempted (the budget ran out first)"
+        fi
+        log_warn "The kubelet will retry ${image} in-cluster"
         return 0
     fi
 

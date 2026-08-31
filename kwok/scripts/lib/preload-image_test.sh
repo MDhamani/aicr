@@ -92,6 +92,7 @@ PATH="${STUB_DIR}:${PATH}"
 #   STUB_PULL_FAILS   number of leading `docker pull` attempts that fail
 #   STUB_PULL_HANGS   non-empty makes every `docker pull` hang forever
 #   STUB_INSPECT_HANGS non-empty makes every `docker image inspect` hang forever
+#   STUB_PULL_SLOW_FAIL seconds a `docker pull` stalls after emitting its error
 #   STUB_KIND_LOAD_RC `kind load` exit code
 #   STUB_CLUSTERS     newline-separated `kind get clusters` output
 write_stubs() {
@@ -114,7 +115,19 @@ if [[ "$1" == "pull" ]]; then
     # A pull that never returns — the registry accepts the connection and then
     # goes quiet. Only `timeout` ends this.
     if [[ -n "${STUB_PULL_HANGS:-}" ]]; then sleep 3600; fi
-    if (( n <= ${STUB_PULL_FAILS:-0} )); then exit 1; fi
+    # A pull that reports its cause and then stalls until `timeout` kills it,
+    # consuming the budget. stderr is written FIRST so the cause exists even
+    # though the process never exits on its own.
+    if [[ -n "${STUB_PULL_SLOW_FAIL:-}" ]]; then
+        echo "toomanyrequests: Rate exceeded" >&2
+        sleep "${STUB_PULL_SLOW_FAIL}"
+        exit 1
+    fi
+    if (( n <= ${STUB_PULL_FAILS:-0} )); then
+        # Real docker writes the cause here; the subject must forward it.
+        echo "toomanyrequests: Rate exceeded" >&2
+        exit 1
+    fi
     touch "${STUB_DIR}/pulled"
     exit 0
 fi
@@ -140,7 +153,7 @@ reset() {
     : > "${TRACE}"
     rm -f "${STUB_DIR}/pulls" "${STUB_DIR}/pulled"
     unset STUB_INSPECT_RC STUB_PULL_FAILS STUB_KIND_LOAD_RC STUB_CLUSTERS STUB_PULL_HANGS
-    unset STUB_INSPECT_HANGS
+    unset STUB_INSPECT_HANGS STUB_PULL_SLOW_FAIL
     unset KWOK_PRELOAD_BUDGET_SECONDS
     unset KUBECTL_CONTEXT KWOK_CLUSTER
     export STUB_DIR TRACE
@@ -172,16 +185,49 @@ if [[ "$(cat "${STUB_DIR}/pulls" 2>/dev/null || echo 0)" != "3" ]]; then
     echo "FAIL: retries-transient-pull-failure (want 3 pull attempts, got $(cat "${STUB_DIR}/pulls" 2>/dev/null || echo 0))"
     fails=$((fails + 1))
 else
-    echo "PASS: retries-exactly-three-times"
+    echo "PASS: retries-until-the-pull-succeeds"
 fi
+
+# 3b. Retries are driven by the BUDGET, not a fixed attempt count. The schedule
+#     this replaced gave up after 3 tries in ~17s while holding a 180s budget
+#     (#2483), which is why a throttled pull never recovered. With a budget that
+#     allows more attempts, more attempts must happen.
+reset
+# Three failures then success: the old fixed-3 schedule would give up before
+# the fourth attempt and never load.
+export STUB_PULL_FAILS=3
+export KWOK_PRELOAD_BUDGET_SECONDS=40
+preload_image "${IMG}" >/dev/null; rc=$?
+attempts=$(cat "${STUB_DIR}/pulls" 2>/dev/null || echo 0)
+check "budget-allows-more-than-three-attempts" 0 "${rc}" "kind load docker-image ${IMG}"
+if (( attempts >= 4 )); then
+    echo "PASS: retry-count-follows-the-budget (${attempts} attempts)"
+else
+    echo "FAIL: retry-count-follows-the-budget (only ${attempts} attempts; a fixed 3-attempt cap is back)"
+    fails=$((fails + 1))
+fi
+unset KWOK_PRELOAD_BUDGET_SECONDS
 
 # 4. Every pull fails -> rc still 0 and NO side-load attempted. The kubelet
 #    fallback must remain, and a missing image must not be "loaded".
 reset
 export STUB_PULL_FAILS=99
-preload_image "${IMG}" >/dev/null; rc=$?
+# Small budget: exhaustion now means "spent the budget", so the default 180s
+# would make this case dominate the suite's runtime.
+export KWOK_PRELOAD_BUDGET_SECONDS=5
+out=$(preload_image "${IMG}" 2>&1); rc=$?
 check "pull-exhausted-does-not-fail-the-lane" 0 "${rc}"
 check_absent "pull-exhausted-skips-load" "kind load"
+# The failure REASON must reach the log, not merely the "last error:" label.
+# Asserting the label alone passes even when the captured stderr is empty --
+# which is exactly the discard-the-cause bug this guards against (#2483).
+if [[ "${out}" == *"toomanyrequests"* ]]; then
+    echo "PASS: pull-exhausted-reports-the-error"
+else
+    echo "FAIL: pull-exhausted-reports-the-error (docker's stderr was not forwarded: ${out})"
+    fails=$((fails + 1))
+fi
+unset KWOK_PRELOAD_BUDGET_SECONDS
 
 # 5. Side-load itself fails -> rc still 0. Same reason.
 reset
@@ -290,6 +336,28 @@ check "hanging-inspect-does-not-fail-the-lane" 0 "${rc}"
 check_bounded "hanging-inspect-is-bounded" "${KWOK_PRELOAD_BUDGET_SECONDS}" "${elapsed}"
 check_absent "hanging-inspect-skips-load" "kind load"
 unset STUB_INSPECT_HANGS KWOK_PRELOAD_BUDGET_SECONDS
+
+# 13. A failed pull that consumes the LAST of the budget must still report its
+#     cause. This is a different loop exit from case 4: there the budget check
+#     fails before an attempt, here the attempt itself spends the budget and the
+#     loop breaks out of the backoff clamp. An earlier version reported the
+#     cause on only one of those paths, so this exact case lost the error.
+reset
+export STUB_PULL_SLOW_FAIL=30
+export KWOK_PRELOAD_BUDGET_SECONDS=3
+started=$(date +%s)
+out=$(preload_image "${IMG}" 2>&1); rc=$?
+elapsed=$(( $(date +%s) - started ))
+check "budget-consumed-by-pull-does-not-fail-the-lane" 0 "${rc}"
+check_bounded "budget-consumed-by-pull-is-bounded" "${KWOK_PRELOAD_BUDGET_SECONDS}" "${elapsed}"
+if [[ "${out}" == *"toomanyrequests"* ]]; then
+    echo "PASS: budget-consumed-by-pull-reports-the-error"
+else
+    echo "FAIL: budget-consumed-by-pull-reports-the-error (cause lost on this path: ${out})"
+    fails=$((fails + 1))
+fi
+check_absent "budget-consumed-by-pull-skips-load" "kind load"
+unset STUB_PULL_SLOW_FAIL KWOK_PRELOAD_BUDGET_SECONDS
 
 if (( fails > 0 )); then
     echo "FAILED: ${fails} case(s)"
