@@ -37,14 +37,13 @@
 # the separate network-operator-ocp component with its own NCP
 # manifest and gate mechanism, and are not affected by this file.
 #
-# Design mirrors recipes/components/gpu-operator/readiness.yaml — a
-# single aggregate-state assert per the DGXC precedent referenced in the
-# issue. Per-operand DaemonSet checks are deliberately elided: the
-# operator's aggregate is authoritative, so an explicit DS list would
-# either duplicate that signal or drift from it (name/OS variance across
-# overlays), and the gate CLI's --stability-window (see
-# defaults.ReadinessGateStabilityWindow) already provides the sleep +
-# re-assert cadence for catching transient flaps during driver deploy.
+# The gate uses the operator's aggregate state rather than enumerating operand
+# DaemonSets, which would duplicate that authoritative signal and drift across
+# names and OS variants. Unlike the gpu-operator gate's single positive assert,
+# this gate pairs its positive assertion with a negative assertion so every
+# live NicClusterPolicy must be ready. The gate CLI's --stability-window (see
+# defaults.ReadinessGateStabilityWindow) provides the sleep and re-assert
+# cadence for catching transient flaps during driver deployment.
 #
 # NicClusterPolicy is cluster-scoped, so the assertion is
 # namespace-agnostic; the gate's --namespace flag (set to the resolved
