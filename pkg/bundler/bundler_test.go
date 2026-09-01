@@ -3888,6 +3888,7 @@ func TestMake_OCP(t *testing.T) {
 		for _, want := range []string{
 			"kind: NicClusterPolicy",
 			"state: ready",
+			"(status.state != 'ready'): true",
 			"nicclusterpolicies",
 		} {
 			if !strings.Contains(body, want) {

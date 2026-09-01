@@ -22,10 +22,12 @@
 # network-operator-ocp then places this barrier before its ClusterPolicy and
 # prevents the nvidia-peermem driver path from racing OFED installation.
 #
-# Match every NicClusterPolicy by aggregate state rather than pinning the
-# default name. This keeps the gate valid if a downstream values override
-# renames the policy while still failing when any managed NIC stack is not
-# ready.
+# Require at least one ready NicClusterPolicy, then reject any live policy whose
+# aggregate state is not ready. The positive assertion prevents an empty list
+# from passing; the negative assertion supplies the all-items semantics because
+# unnamed positive Chainsaw assertions otherwise pass when any one item matches.
+# This keeps the gate valid if a downstream values override renames the policy
+# while still failing when any managed NIC stack is not ready.
 apiVersion: chainsaw.kyverno.io/v1alpha1
 kind: Test
 metadata:
@@ -44,3 +46,8 @@ spec:
               kind: NicClusterPolicy
               status:
                 state: ready
+        - error:
+            resource:
+              apiVersion: mellanox.com/v1alpha1
+              kind: NicClusterPolicy
+              (status.state != 'ready'): true
