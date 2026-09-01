@@ -351,11 +351,12 @@ func TestDeploymentOrderGuards(t *testing.T) {
 	}
 }
 
-// TestPeermemRecipesOrderOFEDBeforeGPUDriver guards the legacy
-// nvidia-peermem route. When GPU Operator manages the driver with
-// driver.rdma.enabled=true, its driver pod waits for MOFED kernel symbols
-// supplied by Network Operator, so the NicClusterPolicy must reconcile first.
-func TestPeermemRecipesOrderOFEDBeforeGPUDriver(t *testing.T) {
+// TestPeermemRecipesDeclareNetworkOperatorDependency guards the ordering half
+// of the legacy nvidia-peermem mitigation. When GPU Operator manages the driver
+// with driver.rdma.enabled=true, its driver pod needs MOFED kernel symbols from
+// Network Operator. dependencyRefs orders those deployment units; an emitted
+// readiness gate is still required to wait for NicClusterPolicy reconciliation.
+func TestPeermemRecipesDeclareNetworkOperatorDependency(t *testing.T) {
 	tests := []struct {
 		name            string
 		criteria        func() *Criteria
