@@ -670,3 +670,295 @@ func TestConfig_RuntimeInventoryMode(t *testing.T) {
 		t.Errorf("nil Config: set=%v err=%v, want false/nil", set, err)
 	}
 }
+
+// bundleConfig exercises every spec.bundle field BundleOptions projects, so a
+// dropped mapping shows up as a wrong value rather than a smaller option list.
+const bundleConfig = `apiVersion: aicr.run/v1beta1
+kind: AICRConfig
+spec:
+  bundle:
+    deployment:
+      deployer: argocd
+      repo: https://git.example.com/fleet
+      appName: fleet-gpu
+      vendorCharts: true
+      set:
+        - gpu-operator:driver.version=570.86.16
+      dynamic:
+        - gpu-operator:driver.enabled
+    scheduling:
+      systemNodeSelector:
+        role: system
+      systemNodeTolerations:
+        - "node-role.kubernetes.io/control-plane:NoSchedule"
+      acceleratedNodeSelector:
+        role: gpu
+      acceleratedNodeTolerations:
+        - "nvidia.com/gpu:NoSchedule"
+      draEvictionNodeLabel: nvidia.com/drain=true
+      workloadGate: aicr.run/gate=busy:NoSchedule
+      workloadSelector:
+        app: training
+      nodes: 12
+      storageClass: fast
+      sharedStorageClass: shared
+    attestation:
+      enabled: true
+      certificateIdentityRegexp: ^https://github\.com/NVIDIA/.*$
+      oidcDeviceFlow: true
+      fulcioURL: https://fulcio.example.com
+      rekorURL: https://rekor.example.com
+`
+
+// TestConfig_BundleOptions asserts the FOLDED VALUES, not that some options
+// were produced. A count-only assertion passes when two fields are swapped,
+// which is the whole failure mode this derivation can have.
+func TestConfig_BundleOptions(t *testing.T) {
+	cfg, err := aicr.LoadConfig(context.Background(), writeConfig(t, bundleConfig))
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+
+	opts, err := cfg.BundleOptions()
+	if err != nil {
+		t.Fatalf("BundleOptions: %v", err)
+	}
+	if opts.Config == nil {
+		t.Fatal("BundleOptions returned a nil Config")
+	}
+	bc := opts.Config
+
+	if got, want := string(bc.Deployer()), "argocd"; got != want {
+		t.Errorf("Deployer = %q, want %q", got, want)
+	}
+	if got, want := bc.RepoURL(), "https://git.example.com/fleet"; got != want {
+		t.Errorf("RepoURL = %q, want %q", got, want)
+	}
+	if got, want := bc.EstimatedNodeCount(), 12; got != want {
+		t.Errorf("EstimatedNodeCount = %d, want %d", got, want)
+	}
+	if got, want := bc.StorageClass(), "fast"; got != want {
+		t.Errorf("StorageClass = %q, want %q", got, want)
+	}
+	if got, want := bc.SharedStorageClass(), "shared"; got != want {
+		t.Errorf("SharedStorageClass = %q, want %q", got, want)
+	}
+	if !bc.VendorCharts() {
+		t.Error("VendorCharts = false, want true")
+	}
+	if !bc.Attest() {
+		t.Error("Attest = false, want true")
+	}
+	if got, want := bc.CertificateIdentityRegexp(), `^https://github\.com/NVIDIA/.*$`; got != want {
+		t.Errorf("CertificateIdentityRegexp = %q, want %q", got, want)
+	}
+	if got, want := bc.SystemNodeSelector()["role"], "system"; got != want {
+		t.Errorf("SystemNodeSelector[role] = %q, want %q", got, want)
+	}
+	if got, want := bc.AcceleratedNodeSelector()["role"], "gpu"; got != want {
+		t.Errorf("AcceleratedNodeSelector[role] = %q, want %q", got, want)
+	}
+	if got, want := bc.WorkloadSelector()["app"], "training"; got != want {
+		t.Errorf("WorkloadSelector[app] = %q, want %q", got, want)
+	}
+	if got, want := bc.AppName(), "fleet-gpu"; got != want {
+		t.Errorf("AppName = %q, want %q", got, want)
+	}
+	if got := bc.DRAEvictionNodeLabel(); got.Key != "nvidia.com/drain" || got.Value != "true" {
+		t.Errorf("DRAEvictionNodeLabel = %+v, want nvidia.com/drain=true", got)
+	}
+	if got := bc.WorkloadGateTaint(); got == nil || got.Key != "aicr.run/gate" {
+		t.Errorf("WorkloadGateTaint = %+v, want key aicr.run/gate", got)
+	}
+	if len(bc.SystemNodeTolerations()) != 1 {
+		t.Errorf("SystemNodeTolerations = %v, want 1 entry", bc.SystemNodeTolerations())
+	}
+	if len(bc.AcceleratedNodeTolerations()) != 1 {
+		t.Errorf("AcceleratedNodeTolerations = %v, want 1 entry", bc.AcceleratedNodeTolerations())
+	}
+	if len(bc.ValueOverrides()) == 0 {
+		t.Error("ValueOverrides is empty; spec.bundle.deployment.set was dropped")
+	}
+	if !bc.HasDynamicValues() {
+		t.Error("HasDynamicValues = false; spec.bundle.deployment.dynamic was dropped")
+	}
+
+	// This fixture DOES set rekorURL, which is an explicit Rekor v1 choice, so
+	// the TUF signing config must be off. The default direction is covered by
+	// TestConfig_BundleOptions_SigningTargetDefault.
+	if opts.OIDCResolve.UseTUFSigningConfig {
+		t.Error("UseTUFSigningConfig = true despite an explicit rekorURL")
+	}
+
+	// The four signing settings reach the attester, not the bundler.
+	if !opts.OIDCResolve.Attest {
+		t.Error("OIDCResolve.Attest = false, want true")
+	}
+	if !opts.OIDCResolve.DeviceFlow {
+		t.Error("OIDCResolve.DeviceFlow = false, want true")
+	}
+	if got, want := opts.OIDCResolve.FulcioURL, "https://fulcio.example.com"; got != want {
+		t.Errorf("OIDCResolve.FulcioURL = %q, want %q", got, want)
+	}
+	if got, want := opts.OIDCResolve.RekorURL, "https://rekor.example.com"; got != want {
+		t.Errorf("OIDCResolve.RekorURL = %q, want %q", got, want)
+	}
+	// Keyless fixture: no KMS key. Setting both is rejected outright, which
+	// TestConfig_BundleOptions_SigningModeExclusive covers.
+	if opts.OIDCResolve.SigningKey != "" {
+		t.Errorf("OIDCResolve.SigningKey = %q, want empty for a keyless config", opts.OIDCResolve.SigningKey)
+	}
+
+	// Fields with no spec.bundle counterpart stay zero so the caller, not the
+	// derivation, decides them.
+	if opts.Attester != nil {
+		t.Error("Attester should stay nil; OIDCResolve drives signing")
+	}
+	if opts.OutputDir != "" || opts.Timeout != 0 || opts.BinaryAttestation != nil {
+		t.Error("OutputDir/Timeout/BinaryAttestation should stay at zero values")
+	}
+}
+
+// TestConfig_BundleOptions_Absent covers the paths the CLI hits when --config
+// is absent or the document omits spec.bundle: derive unconditionally, get
+// "nothing configured" rather than an error.
+func TestConfig_BundleOptions_Absent(t *testing.T) {
+	t.Run("nil config", func(t *testing.T) {
+		var cfg *aicr.Config
+		opts, err := cfg.BundleOptions()
+		if err != nil {
+			t.Fatalf("BundleOptions on nil Config: %v", err)
+		}
+		if opts.Config != nil || opts.OIDCResolve.Attest {
+			t.Error("nil Config should derive an empty BundleOptions")
+		}
+	})
+
+	t.Run("no spec.bundle", func(t *testing.T) {
+		cfg, err := aicr.LoadConfig(context.Background(), writeConfig(t, verifyConfig))
+		if err != nil {
+			t.Fatalf("LoadConfig: %v", err)
+		}
+		opts, err := cfg.BundleOptions()
+		if err != nil {
+			t.Fatalf("BundleOptions: %v", err)
+		}
+		// An unset draEvictionNodeLabel must leave the bundler's documented
+		// default in place rather than overwriting it with a zero label.
+		if opts.Config != nil && opts.Config.DRAEvictionNodeLabel().Key != "" {
+			t.Error("absent spec.bundle should not set a DRA eviction label")
+		}
+	})
+}
+
+// TestConfig_BundleOptions_SigningModeExclusive pins the rule the CLI enforces
+// in validateSigningKeyExclusivity. ResolveAttesterLazy takes the KMS branch
+// whenever SigningKey is non-empty, so accepting both would sign with the key
+// while the document's keyless settings silently did nothing — the caller
+// believing they signed against a named Fulcio.
+func TestConfig_BundleOptions_SigningModeExclusive(t *testing.T) {
+	const head = `apiVersion: aicr.run/v1beta1
+kind: AICRConfig
+spec:
+  bundle:
+    attestation:
+      enabled: true
+`
+	tests := []struct {
+		name    string
+		body    string
+		wantErr bool
+	}{
+		{"kms alone is fine", head + "      signingKey: gcpkms://projects/p/k\n", false},
+		{"keyless alone is fine", head + "      oidcDeviceFlow: true\n      fulcioURL: https://fulcio.example.com\n", false},
+		{"kms plus device flow is rejected", head + "      signingKey: gcpkms://projects/p/k\n      oidcDeviceFlow: true\n", true},
+		{"kms plus fulcio is rejected", head + "      signingKey: gcpkms://projects/p/k\n      fulcioURL: https://fulcio.example.com\n", true},
+		// rekorURL is NOT a conflict; it has its own rule against signingConfig.
+		{"kms plus rekor is allowed", head + "      signingKey: gcpkms://projects/p/k\n      rekorURL: https://rekor.example.com\n", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := aicr.LoadConfig(context.Background(), writeConfig(t, tt.body))
+			if err != nil {
+				if tt.wantErr {
+					return // rejected even earlier, which is also fail-closed
+				}
+				t.Fatalf("LoadConfig: %v", err)
+			}
+			_, err = cfg.BundleOptions()
+			if tt.wantErr && err == nil {
+				t.Fatal("BundleOptions accepted mixed KMS and keyless signing settings")
+			}
+			if !tt.wantErr && err != nil {
+				t.Fatalf("BundleOptions rejected a valid single-mode config: %v", err)
+			}
+		})
+	}
+}
+
+// TestConfig_BundleOptions_SigningKeyTrimmed covers the YAML block-scalar case
+// the CLI trims for: untrimmed, the key fails late in the KMS URI parser.
+func TestConfig_BundleOptions_SigningKeyTrimmed(t *testing.T) {
+	body := `apiVersion: aicr.run/v1beta1
+kind: AICRConfig
+spec:
+  bundle:
+    attestation:
+      enabled: true
+      signingKey: "  gcpkms://projects/p/k  "
+`
+	cfg, err := aicr.LoadConfig(context.Background(), writeConfig(t, body))
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+	opts, err := cfg.BundleOptions()
+	if err != nil {
+		t.Fatalf("BundleOptions: %v", err)
+	}
+	if got := opts.OIDCResolve.SigningKey; got != "gcpkms://projects/p/k" {
+		t.Errorf("SigningKey = %q, want it trimmed", got)
+	}
+}
+
+// TestConfig_BundleOptions_SigningTargetDefault pins the transparency target,
+// which is invisible in the derived value and only shows up in where a
+// signature lands.
+//
+// transparencyForOptions falls through to NewRekorPolicy("") — public Rekor
+// v1 — when SigningConfig, SigningConfigPath, UseTUFSigningConfig and RekorURL
+// are all unset. The CLI never hits that: signingTargetFromFlags defaults
+// useTUF to true with no --rekor-url. Without the same default here, a
+// config-driven SDK sign records to the legacy log while the identical CLI
+// invocation records to v2 (#1650), silently.
+func TestConfig_BundleOptions_SigningTargetDefault(t *testing.T) {
+	const head = `apiVersion: aicr.run/v1beta1
+kind: AICRConfig
+spec:
+  bundle:
+    attestation:
+      enabled: true
+`
+	tests := []struct {
+		name    string
+		body    string
+		wantTUF bool
+	}{
+		{"no rekorURL takes the TUF signing config (v2)", head, true},
+		{"explicit rekorURL is a deliberate v1 choice", head + "      rekorURL: https://rekor.example.com\n", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, err := aicr.LoadConfig(context.Background(), writeConfig(t, tt.body))
+			if err != nil {
+				t.Fatalf("LoadConfig: %v", err)
+			}
+			opts, err := cfg.BundleOptions()
+			if err != nil {
+				t.Fatalf("BundleOptions: %v", err)
+			}
+			if opts.OIDCResolve.UseTUFSigningConfig != tt.wantTUF {
+				t.Errorf("UseTUFSigningConfig = %v, want %v", opts.OIDCResolve.UseTUFSigningConfig, tt.wantTUF)
+			}
+		})
+	}
+}

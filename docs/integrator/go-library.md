@@ -173,7 +173,7 @@ its **current** contents, which for a URL or a ConfigMap (or a file
 someone rewrote) need not be what this call parsed. When byte-for-byte
 identity with the loaded snapshot matters, such as hashing what you
 validated, capture the source contents yourself and load from that
-capture instead of re-reading afterwards.
+capture instead of re-reading afterward.
 
 ### Comparing snapshots for drift
 
@@ -886,6 +886,8 @@ derive step rather than the load step.
 | Method | Reads |
 |---|---|
 | `BundleVerifyOptions()` | `spec.verify.policy` + `spec.verify.trust` |
+| `BundleOptions()` | `spec.bundle.deployment` + `spec.bundle.scheduling` + `spec.bundle.attestation` |
+| `ValidateOptions()` | `spec.validate.execution` + the agent fields the validator accepts as options |
 | `RecipeSource()` | `spec.recipe.data` |
 | `RecipeCriteria(reg)` | `spec.recipe.criteria` |
 | `RecipeResolveOptions()` | `spec.recipe.profile`, `spec.recipe.configuration.slurm.accounting.mode`, `spec.recipe.configuration.runtimeInventory.mode` |
@@ -893,10 +895,59 @@ derive step rather than the load step.
 | `SnapshotPath()` | `spec.recipe.input.snapshot` |
 | `IsCriteriaStrict()` | `spec.recipe.criteriaStrict` |
 
-`spec.bundle`, `spec.validate`, and `spec.snapshot` are not yet projected;
-`Unwrap()` reaches the raw document meanwhile. Needing it is worth reporting —
-it means a derivation is missing, and `pkg/config` carries no stability
-guarantee.
+`spec.snapshot` is not yet projected, and neither is `spec.validate.evidence`;
+`Unwrap()` reaches the raw document meanwhile. Needing it is worth reporting — it means a
+derivation is missing, and `pkg/config` carries no stability guarantee.
+
+### What `BundleOptions()` does and does not carry
+
+`BundleOptions()` returns a populated `Config` (the 18 bundler settings
+`spec.bundle.deployment` and `spec.bundle.scheduling` configure, plus the two
+attestation flags the bundler itself reads) and `OIDCResolve` (the four signing
+settings that reach the attester rather than the bundler).
+
+Six resolved fields have no counterpart, by design rather than omission:
+
+| Field | Why not projected |
+|---|---|
+| `spec.bundle.input.recipe` | You already pass the recipe to `MakeBundle`; projecting it would give the same decision two homes. |
+| `spec.bundle.output.target` (and its raw form), `.imageRefs` | Output destinations chosen per invocation. `OutputDir` is the analog `MakeBundle` honors. |
+| `spec.bundle.registry.insecureTLS`, `.plainHTTP` | OCI transport. `MakeBundle` does not push — the caller does, afterward — so a field here would be surface nothing reads. `EvidenceOptions` and `SignOptions` carry them because those operations do reach a registry. |
+
+Signing follows the same derive-don't-apply rule as everything else: a non-nil
+`Attester` wins over `OIDCResolve`, so an explicitly supplied signer is never
+silently rebuilt from config.
+
+A KMS key and keyless OIDC are mutually exclusive, and `BundleOptions()`
+rejects a document setting both rather than letting `signingKey` quietly win —
+the same rule the CLI enforces.
+
+**Device flow needs a prompt writer.** `spec.bundle.attestation.oidcDeviceFlow`
+sets `OIDCResolve.DeviceFlow`, but config cannot carry an `io.Writer`, so the
+derived value leaves `PromptWriter` nil. Set one before signing or the
+verification code the user has to enter goes nowhere:
+
+```go
+opts, err := cfg.BundleOptions()
+if err != nil {
+    return err
+}
+opts.OIDCResolve.PromptWriter = os.Stderr   // or any caller-owned writer
+```
+
+```go
+opts, err := cfg.BundleOptions()       // from spec.bundle
+if err != nil {
+    return err                         // malformed spec.bundle, or mixed
+}                                      // KMS + keyless signing settings
+opts.OutputDir = "./bundles"           // caller wins, visibly
+artifact, err := client.MakeBundle(ctx, rec, opts)
+```
+
+Check that first error rather than letting the second assignment overwrite it.
+`BundleOptions()` returns a zero value alongside its error, so a swallowed
+failure bundles with defaults — no deployer, no overrides, no attestation —
+from a document that looked configured.
 
 One asymmetry worth knowing: `IgnoreTLog` has no config counterpart, so
 `BundleVerifyOptions()` always leaves it false. It weakens the trust floor by
@@ -1179,7 +1230,7 @@ if stderrors.As(err, &se) {
 
 ## Context handling
 
-`ResolveRecipe` (and every other context-aware facade method) honours
+`ResolveRecipe` (and every other context-aware facade method) honors
 context cancellation. Capped entry points wrap the caller's context
 with `context.WithTimeout` against their per-operation cap; the
 effective deadline is then the smaller of the caller's deadline and the
@@ -1316,3 +1367,24 @@ active deprecations across all surfaces is in
 - [Recipe development](./recipe-development.md) — authoring recipes
 
 [semver]: https://semver.org/spec/v2.0.0.html
+
+### What `ValidateOptions()` does and does not carry
+
+`spec.validate` is the one section that does not map to a single destination,
+so `ValidateOptions()` carries only the part the validator accepts as options:
+namespace, image pull secrets, node selector, tolerations, no-cluster, cleanup,
+phases, fail-fast, and timeout. The slice is appendable — layer your own
+options after the derived ones and the later value wins.
+
+The rest of the section has other homes, and knowing which saves a search:
+
+| Field | Home |
+|---|---|
+| `spec.validate.agent.image`, `.jobName`, `.serviceAccountName`, `.requireGpu` | `AgentConfig`. These configure the validator's Kubernetes Job; `pkg/validator` exposes no option for any of them, so a `WithValidation*` here would have nothing to translate into. |
+| `spec.validate.execution.failOnError` | Nowhere, deliberately. It decides whether a failed check makes the *caller* fail; the validator reports and does not act on it. Command-line-only for the same reason as `IgnoreTLog`: a checked-in file should not be able to make a failing run report success. |
+| `spec.validate.input.recipe`, `.snapshot` | Not projected — you already pass both to `ValidateState`. |
+| `spec.validate.evidence` | **Not projected.** `EvidenceOptions` is the shape it would map onto, but no `Config` derivation produces one yet, so reading it still needs `Unwrap()`. |
+
+One inversion worth knowing: config says `noCleanup`, the option says
+`cleanup`. `ValidateOptions()` flips it, so `noCleanup: true` becomes
+`WithValidationCleanup(false)`.

@@ -16,7 +16,9 @@ package aicr
 
 import (
 	"context"
+	"strings"
 
+	bundlerconfig "github.com/NVIDIA/aicr/pkg/bundler/config"
 	appconfig "github.com/NVIDIA/aicr/pkg/config"
 	"github.com/NVIDIA/aicr/pkg/errors"
 )
@@ -321,4 +323,239 @@ func (c *Config) IsCriteriaStrict() bool {
 		return false
 	}
 	return c.internal.Recipe().IsCriteriaStrict()
+}
+
+// BundleOptions derives Client.MakeBundle options from spec.bundle.
+//
+// Config carries the 18 bundler settings the section configures — deployment
+// (deployer, repo, value overrides, dynamic values, vendoring, app name),
+// scheduling (system/accelerated selectors and tolerations, DRA eviction
+// label, workload gate and selector, node count, storage classes), and the
+// two attestation flags the bundler itself reads (attest, certificate
+// identity regexp). OIDCResolve carries what reaches the attester rather than
+// the bundler: the Attest gate, DeviceFlow, FulcioURL, RekorURL, SigningKey,
+// and the derived UseTUFSigningConfig.
+//
+// # What is deliberately NOT projected
+//
+// Six resolved fields have no BundleOptions counterpart, by design:
+//
+//   - RecipeInput names which recipe to bundle. The caller already passes
+//     the recipe to MakeBundle, so projecting it would give the same
+//     decision two homes.
+//   - OutputTarget, OutputTargetRaw and ImageRefs are output destinations
+//     chosen per invocation. OutputDir is the analog MakeBundle honors,
+//     and the CLI owns flag-vs-config precedence for the rest.
+//   - InsecureTLS and PlainHTTP configure OCI transport. MakeBundle does not
+//     push — the CLI does, after it returns — so a field here would be
+//     surface that nothing reads. EvidenceOptions and SignOptions carry them
+//     because those operations do reach a registry.
+//
+// Reading any of the six still requires Unwrap(), which is the signal the
+// type's godoc describes: a field that is genuinely un-projected, not one
+// whose derivation is missing.
+//
+// # Zero values
+//
+// PromptWriter is also left nil, because config cannot carry an io.Writer. A
+// nil writer is treated as io.Discard, so a derived DeviceFlow discards the
+// verification URL and user code and the lazy attester then blocks until the
+// context deadline on first Attest(). That fails closed — no wrong signature —
+// but the caller must set OIDCResolve.PromptWriter to use device flow at all.
+// Erroring here instead would break derive-don't-apply: a caller may well
+// supply their own Attester and never reach the device flow.
+//
+// Attester, BinaryAttestation, OutputDir and Timeout are left at their zero
+// values. None has a spec.bundle counterpart, and defaulting them here would
+// hide which layer chose. A caller sets them after deriving, which is the
+// same precedence the CLI applies to an explicitly-set flag.
+//
+// Returns an error when spec.bundle is present but malformed.
+func (c *Config) BundleOptions() (BundleOptions, error) {
+	if c == nil || c.internal == nil {
+		return BundleOptions{}, nil
+	}
+	resolved, err := c.internal.Bundle().Resolve()
+	if err != nil {
+		// Already coded, and the message carries the spec path that failed.
+		return BundleOptions{}, err
+	}
+	if resolved == nil {
+		return BundleOptions{}, nil
+	}
+
+	opts := []bundlerconfig.Option{
+		bundlerconfig.WithDeployer(resolved.Deployer),
+		bundlerconfig.WithRepoURL(resolved.Repo),
+		bundlerconfig.WithValueOverridePaths(resolved.ValueOverrides),
+		bundlerconfig.WithDynamicValuePaths(resolved.DynamicValues),
+		bundlerconfig.WithSystemNodeSelector(resolved.SystemNodeSelector),
+		bundlerconfig.WithSystemNodeTolerations(resolved.SystemNodeTolerations),
+		bundlerconfig.WithAcceleratedNodeSelector(resolved.AcceleratedNodeSelector),
+		bundlerconfig.WithAcceleratedNodeTolerations(resolved.AcceleratedNodeTolerations),
+		bundlerconfig.WithWorkloadGateTaint(resolved.WorkloadGate),
+		bundlerconfig.WithWorkloadSelector(resolved.WorkloadSelector),
+		bundlerconfig.WithEstimatedNodeCount(resolved.Nodes),
+		bundlerconfig.WithStorageClass(resolved.StorageClass),
+		bundlerconfig.WithSharedStorageClass(resolved.SharedStorageClass),
+		bundlerconfig.WithVendorCharts(resolved.VendorCharts),
+		bundlerconfig.WithAppName(resolved.AppName),
+		bundlerconfig.WithAttest(resolved.Attest),
+		bundlerconfig.WithCertificateIdentityRegexp(resolved.CertIDRegexp),
+	}
+	// DRAEvictionNodeLabel resolves as a pointer specifically so "unset" is
+	// distinguishable from "set to the zero label", and the option takes a
+	// value. Appending unconditionally would dereference nil and, worse,
+	// would overwrite the NVIDIA-documented default the bundler applies when
+	// config said nothing.
+	if resolved.DRAEvictionNodeLabel != nil {
+		opts = append(opts, bundlerconfig.WithDRAEvictionNodeLabel(*resolved.DRAEvictionNodeLabel))
+	}
+
+	// Signing mode is exclusive: a KMS key or keyless OIDC, never both.
+	// ResolveAttesterLazy picks KMS whenever SigningKey is non-empty, so a
+	// document setting both would silently sign with the key while its
+	// fulcioURL/oidcDeviceFlow settings did nothing. The CLI rejects that
+	// combination (validateSigningKeyExclusivity, and
+	// TestValidateSigningKeyExclusivity_ConfigSourcedConflict covers exactly
+	// the config-sourced case) — enforcing it only there would leave SDK
+	// callers with the silent behavior.
+	//
+	// Trimmed first for the same reason the CLI trims: a YAML block scalar
+	// carries surrounding whitespace, and an untrimmed key fails late in the
+	// KMS URI parser instead of here. rekorURL is deliberately not a conflict;
+	// it has its own exclusivity rule against signingConfig.
+	signingKey := strings.TrimSpace(resolved.SigningKey)
+	if resolved.SigningKey != "" && signingKey == "" {
+		return BundleOptions{}, errors.New(errors.ErrCodeInvalidRequest,
+			"spec.bundle.attestation.signingKey must not be blank")
+	}
+	if signingKey != "" {
+		for _, conflict := range []struct {
+			field  string
+			active bool
+		}{
+			{"oidcDeviceFlow", resolved.OIDCDeviceFlow},
+			{"fulcioURL", resolved.FulcioURL != ""},
+		} {
+			if conflict.active {
+				return BundleOptions{}, errors.New(errors.ErrCodeInvalidRequest,
+					"spec.bundle.attestation.signingKey is mutually exclusive with "+
+						"spec.bundle.attestation."+conflict.field)
+			}
+		}
+	}
+
+	return BundleOptions{
+		Config: bundlerconfig.NewConfig(opts...),
+		OIDCResolve: OIDCResolveOptions{
+			Attest:     resolved.Attest,
+			DeviceFlow: resolved.OIDCDeviceFlow,
+			FulcioURL:  resolved.FulcioURL,
+			RekorURL:   resolved.RekorURL,
+			SigningKey: signingKey,
+			// Mirrors the CLI's signingTargetFromFlags: with no explicit Rekor
+			// URL, sign against the TUF-distributed signing config (Rekor v2,
+			// #1650) rather than falling through transparencyForOptions to
+			// NewRekorPolicy("") — public Rekor v1.
+			//
+			// Without this a config-driven SDK sign silently records to the
+			// legacy log while the identical CLI invocation records to v2.
+			// AttestationSpec carries no signing-config or TUF field, so
+			// rekorURL is the only signal config can give: setting it is an
+			// explicit v1 choice, and leaving it empty takes the same default
+			// the CLI does.
+			UseTUFSigningConfig: resolved.RekorURL == "",
+		},
+	}, nil
+}
+
+// ValidateOptions derives Client.ValidateState options from spec.validate.
+//
+// Nine settings map onto the WithValidation* option set: namespace, image pull
+// secrets, node selector, tolerations, no-cluster, cleanup, phases, fail-fast
+// and timeout. The returned slice is appendable, so a caller layers its own
+// options after the derived ones and the later value wins — the same shape
+// RecipeResolveOptions uses, and the reason this returns options rather than a
+// built value.
+//
+// # Where the rest of spec.validate goes
+//
+// The section is not served by one destination, which the per-section table in
+// docs/integrator/go-library.md now records:
+//
+//   - Image, JobName, ServiceAccountName and RequireGPU configure the
+//     validator's Kubernetes Job, and reach it through AgentConfig rather than
+//     a validator option — pkg/validator exposes no With* for any of them.
+//     Deriving them here would produce options with nothing to translate into.
+//   - FailOnError decides whether a failed check makes the CALLER fail. The
+//     validator reports; it does not act on it, so there is nothing to pass
+//     through. Command-line-only for the same reason IgnoreTLog is on
+//     BundleVerifyOptions: a checked-in file should not be able to make a
+//     failing run report success.
+//   - RecipePath and SnapshotPath name what to validate. The caller already
+//     passes both to ValidateState.
+//   - EvidenceCNCF and EvidenceAttestation configure evidence emission.
+//     EvidenceOptions is the shape they would map onto, but no derivation
+//     produces one yet, so reading them still needs Unwrap(). Tracked as a
+//     remaining gap rather than a decided exclusion.
+//
+// # Two mappings that are not pass-throughs
+//
+// NoCleanup is INVERTED: the config field says "do not clean up", the option
+// says "clean up". Passing it straight through would delete artifacts a
+// post-mortem asked to keep, silently and in either direction.
+//
+// Phases are cast, not re-parsed, because Validation().Resolve() already
+// rejects an unknown entry and names the spec field — on the WrapConfig path
+// too, since that check lives in Resolve rather than in the loader.
+//
+// Returns an error when spec.validate is present but malformed.
+func (c *Config) ValidateOptions() ([]ValidateOption, error) {
+	if c == nil || c.internal == nil {
+		return nil, nil
+	}
+	resolved, err := c.internal.Validation().Resolve()
+	if err != nil {
+		// Already coded, and the message carries the spec path that failed.
+		return nil, err
+	}
+	if resolved == nil {
+		return nil, nil
+	}
+
+	opts := []ValidateOption{
+		WithValidationNamespace(resolved.Namespace),
+		WithValidationImagePullSecrets(resolved.ImagePullSecrets),
+		WithValidationNodeSelector(resolved.NodeSelector),
+		WithValidationTolerations(resolved.Tolerations),
+		WithValidationNoCluster(resolved.NoCluster),
+		// Inverted on purpose. See the godoc above.
+		WithValidationCleanup(!resolved.NoCleanup),
+	}
+
+	if len(resolved.Phases) > 0 {
+		// Cast, don't re-parse. Validation().Resolve() rejects an unknown phase
+		// before returning — on both the LoadConfig and WrapConfig paths, since
+		// the check lives in Resolve rather than the loader — so by here every
+		// entry is known-good. A defensive re-parse would be unreachable, and
+		// unreachable validation reads as a guarantee nobody is actually
+		// providing.
+		facade := make([]Phase, len(resolved.Phases))
+		for i, p := range resolved.Phases {
+			facade[i] = Phase(p)
+		}
+		opts = append(opts, WithValidationPhases(facade...))
+	}
+	// FailFast and Timeout resolve as pointers so "unset" stays distinct from
+	// an explicit false/0, and both options take values. Emitting them
+	// unconditionally would turn "config said nothing" into an explicit
+	// choice, overriding the validator's own default.
+	if resolved.FailFast != nil {
+		opts = append(opts, WithValidationFailFast(*resolved.FailFast))
+	}
+	if resolved.Timeout != nil {
+		opts = append(opts, WithValidationTimeout(*resolved.Timeout))
+	}
+	return opts, nil
 }
