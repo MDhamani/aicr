@@ -21,6 +21,8 @@ import (
 	bundlerconfig "github.com/NVIDIA/aicr/pkg/bundler/config"
 	appconfig "github.com/NVIDIA/aicr/pkg/config"
 	"github.com/NVIDIA/aicr/pkg/errors"
+	"github.com/NVIDIA/aicr/pkg/recipe"
+	"github.com/NVIDIA/aicr/pkg/snapshotter"
 )
 
 // Config is a parsed AICRConfig document — the version-controlled file a team
@@ -495,10 +497,12 @@ func (c *Config) BundleOptions() (BundleOptions, error) {
 //     failing run report success.
 //   - RecipePath and SnapshotPath name what to validate. The caller already
 //     passes both to ValidateState.
-//   - EvidenceCNCF and EvidenceAttestation configure evidence emission.
-//     EvidenceOptions is the shape they would map onto, but no derivation
-//     produces one yet, so reading them still needs Unwrap(). Tracked as a
-//     remaining gap rather than a decided exclusion.
+//   - EvidenceAttestation configures the recipe-evidence bundle.
+//     EvidenceAttestationOptions derives it; it is not folded in here because
+//     it targets Client.EmitRecipeEvidence rather than ValidateState.
+//   - EvidenceCNCF configures the CNCF AI Conformance markdown path, which has
+//     no facade emission method to receive it. See EvidenceAttestationOptions
+//     for why that half stays un-projected.
 //
 // # Two mappings that are not pass-throughs
 //
@@ -558,4 +562,215 @@ func (c *Config) ValidateOptions() ([]ValidateOption, error) {
 		opts = append(opts, WithValidationTimeout(*resolved.Timeout))
 	}
 	return opts, nil
+}
+
+// EvidenceAttestationOptions derives Client.EmitRecipeEvidence's options from
+// spec.validate.evidence.attestation, and reports whether the document asked
+// for a recipe-evidence bundle at all.
+//
+// Out is the enable gate, matching the spec field's own contract: an empty
+// out leaves the path off even when bom/push/plainHTTP/insecureTLS are
+// populated, so a half-filled section does not start emitting evidence. False
+// therefore means "not configured", not "misconfigured" — a malformed section
+// is an error instead. That is why this returns a bool rather than a
+// zero-value EvidenceOptions: EmitRecipeEvidence rejects an empty OutDir with
+// ErrCodeInvalidRequest, so a zero value alone could not tell a caller whether
+// the document declined the bundle or fumbled it.
+//
+// Five fields project (out, bom, push, plainHTTP, insecureTLS). The rest of
+// EvidenceOptions is deliberately caller-owned:
+//
+//   - Commit has no spec counterpart. It selects the validator catalog the
+//     bundle's BOM is built against, and it is a property of the running
+//     binary rather than of the document. Set it after deriving.
+//   - OIDCResolve is excluded by the spec itself: a keyless-signing identity
+//     token is a short-lived secret and must not live in a version-controlled
+//     file. The caller resolves it at sign time.
+//   - NoSign and Full are command-line-only, for the same reason FailOnError
+//     and IgnoreTLog are. Both WEAKEN a run — NoSign pushes an unsigned
+//     bundle, Full ships unredacted payloads — and a checked-in file that can
+//     quietly turn off signing is a supply-chain downgrade no reviewer would
+//     see in a diff. Adding spec fields for them would close a "gap" that is
+//     actually a control.
+//
+// # spec.validate.evidence.cncf is NOT projected
+//
+// The evidence section carries two kinds; this method covers one. CNCF AI
+// Conformance emission has no facade entry point at all — there is no
+// Client.Emit* that consumes dir/cncfSubmission/features — so there is
+// nothing for a derivation to feed. Projecting it would mean designing the
+// emission API, not mapping config onto an existing one. Reading that half
+// still needs Unwrap(), and this method is named for the half it carries so
+// the name cannot drift into covering both.
+//
+// Returns (zero, false, nil) for a nil Config, an absent spec.validate, an
+// absent evidence.attestation, or an empty out, and an error when the section
+// is present but malformed.
+func (c *Config) EvidenceAttestationOptions() (EvidenceOptions, bool, error) {
+	if c == nil || c.internal == nil {
+		return EvidenceOptions{}, false, nil
+	}
+	resolved, err := c.internal.Validation().Resolve()
+	if err != nil {
+		// Already coded, and the message carries the spec path that failed.
+		return EvidenceOptions{}, false, err
+	}
+	if resolved == nil || resolved.EvidenceAttestation == nil {
+		return EvidenceOptions{}, false, nil
+	}
+	att := resolved.EvidenceAttestation
+	// The spec's own gate, not an extra one: EvidenceAttestationSpec.Out
+	// documents that setting Out enables the path and an empty Out leaves it
+	// off regardless of the other fields. The CLI applies the same rule in
+	// buildRecipeEvidenceConfig, so honoring it here keeps a config-driven run
+	// and a flag-driven run from diverging on the same document.
+	if att.Out == "" {
+		return EvidenceOptions{}, false, nil
+	}
+	return EvidenceOptions{
+		OutDir:      att.Out,
+		BOMPath:     att.BOM,
+		Push:        att.Push,
+		PlainHTTP:   att.PlainHTTP,
+		InsecureTLS: att.InsecureTLS,
+	}, true, nil
+}
+
+// SnapshotAgentConfig derives Client.CollectSnapshot's AgentConfig from
+// spec.snapshot.
+//
+// These settings map onto the agent Job: namespace, image, image pull
+// secrets, job name, service account, node selector, tolerations, require-GPU,
+// runtime class, OS, max nodes per entry, resource requests and limits,
+// timeout, cleanup and privileged.
+//
+// OS is parsed through the criteria registry rather than copied, matching what
+// the CLI does with --os. That keeps undocumented values from reaching the
+// agent, and it matters for exact matches: an unparsed "Talos" misses the
+// agent's "talos" check and selects incompatible host mounts.
+//
+// AgentConfig's fields are exported, so a caller overrides any of them after
+// deriving — the same derive-don't-apply precedence the other methods use, but
+// without needing an options slice, because the type is a plain struct.
+//
+// # Three mappings that are not pass-throughs
+//
+// NoCleanup is INVERTED against Cleanup, the same shape spec.validate has.
+//
+// Privileged defaults to TRUE when config says nothing. The resolved field is
+// a pointer precisely so "unset" stays distinct from an explicit false, and
+// the CLI applies derefBoolOr(resolved.Privileged, true). Dereferencing a nil
+// pointer to false here would silently drop privileges the collector needs,
+// and the failure would surface as missing data rather than an error.
+//
+// Requests and Limits resolve as raw "name=quantity,..." strings — Resolve
+// deliberately does not parse them — so they are parsed here and a malformed
+// value is an error rather than a silently empty ResourceList.
+//
+// # What is deliberately NOT projected
+//
+// The whole spec.snapshot.output section is un-projected, and that is not an
+// omission. Output describes DELIVERY; AgentConfig describes the collection
+// Job, and the two are different concerns:
+//
+//   - output.format is applied at delivery. The Job always stages YAML in a
+//     ConfigMap, so a format routed through AgentConfig would be silently
+//     ignored (#2398).
+//   - output.path and output.template are not AgentConfig.Output and
+//     .TemplatePath. Per AgentConfig.Output's own godoc, any value that is not
+//     a cm:// URI stages to an internal ConfigMap and delivery becomes the
+//     caller's job. Projecting a file path there would look configured and
+//     write nothing.
+//
+// Callers deliver with snapshotter.DeliverSnapshot, passing Snapshot.Raw.
+//
+// Kubeconfig, Debug, ClusterConfigPath, AKSGPUPoolsPath, DiscoverNetwork,
+// RunID and NameBase are left at their zero values. None has a spec.snapshot
+// counterpart — they are per-invocation or caller-owned. NameBase in
+// particular carries the "aicr" default prefix that lets an unset job name
+// stay empty while deployed objects keep their released names, which is a
+// decision the caller makes, not the document.
+//
+// Returns a zero-value AgentConfig (never nil) when the document has no
+// spec.snapshot, and an error when the section is present but malformed.
+//
+// A zero value is not a working configuration: Privileged is false, which the
+// collector generally needs true. That is deliberate. Defaults apply when the
+// section EXISTS and is silent about a field; a document with no spec.snapshot
+// at all made no snapshot decisions, so the facade does not invent them. A
+// caller in that position supplies its own defaults, as the CLI does from its
+// flag defaults.
+func (c *Config) SnapshotAgentConfig() (*AgentConfig, error) {
+	// A zero-value AgentConfig rather than nil, so a caller that did not supply
+	// a config (or supplied one without spec.snapshot) can derive
+	// unconditionally and then set the caller-owned fields — matching the
+	// "returns zero values" contract in the Config godoc.
+	//
+	// The section-presence check is load-bearing and cannot be replaced by a
+	// nil check on the resolved value: Resolve() returns a NON-nil
+	// SnapshotResolved for an absent section, so falling through would apply
+	// the in-section defaults (Cleanup and Privileged both true) to a document
+	// that never opted into snapshot configuration at all.
+	if c == nil || c.internal == nil || c.internal.Snapshot() == nil {
+		return &AgentConfig{}, nil
+	}
+	resolved, err := c.internal.Snapshot().Resolve()
+	if err != nil {
+		// Already coded, and the message carries the spec path that failed.
+		return nil, err
+	}
+	if resolved == nil {
+		return &AgentConfig{}, nil
+	}
+
+	requests, err := snapshotter.ParseResourceList(resolved.Requests)
+	if err != nil {
+		return nil, errors.Wrap(errors.ErrCodeInvalidRequest,
+			"invalid spec.snapshot.agent.requests", err)
+	}
+	limits, err := snapshotter.ParseResourceList(resolved.Limits)
+	if err != nil {
+		return nil, errors.Wrap(errors.ErrCodeInvalidRequest,
+			"invalid spec.snapshot.agent.limits", err)
+	}
+
+	// The CLI parses --os through the criteria registry so only documented
+	// values reach the agent and the in-pod collector factory, and so an
+	// invalid value errors rather than traveling. Passing resolved.OS through
+	// raw would skip both: "Talos" would miss the agent's exact "talos" match
+	// and select incompatible host mounts.
+	osValue := resolved.OS
+	if osValue != "" {
+		parsed, perr := recipe.NewCriteriaRegistry().ParseOS(osValue)
+		if perr != nil {
+			return nil, errors.Wrap(errors.ErrCodeInvalidRequest,
+				"invalid spec.snapshot.agent.os", perr)
+		}
+		osValue = string(parsed)
+	}
+
+	cfg := &AgentConfig{
+		Namespace:          resolved.Namespace,
+		Image:              resolved.Image,
+		ImagePullSecrets:   resolved.ImagePullSecrets,
+		JobName:            resolved.JobName,
+		ServiceAccountName: resolved.ServiceAccountName,
+		NodeSelector:       resolved.NodeSelector,
+		Tolerations:        resolved.Tolerations,
+		RequireGPU:         resolved.RequireGPU,
+		RuntimeClassName:   resolved.RuntimeClassName,
+		OS:                 osValue,
+		MaxNodesPerEntry:   resolved.MaxNodesPerEntry,
+		Requests:           requests,
+		Limits:             limits,
+		// Inverted on purpose. See the godoc above.
+		Cleanup: !resolved.NoCleanup,
+		// Nil means config said nothing, and the collector's default is
+		// privileged. See the godoc above.
+		Privileged: resolved.Privileged == nil || *resolved.Privileged,
+	}
+	if resolved.Timeout != nil {
+		cfg.Timeout = *resolved.Timeout
+	}
+	return cfg, nil
 }
